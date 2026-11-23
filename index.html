@@ -746,26 +746,27 @@ function showConnectFolder(msg){
   $('#cfpick').onclick=()=>go(true);
   $('#cfcopy').onclick=async()=>{ const i=$('#cfp'); i.select(); try{ await navigator.clipboard.writeText(i.value); }catch(e){ document.execCommand('copy'); } $('#cfcopy').textContent='Copied'; };
 }
+const normUser=s=>String(s||'').trim().toLowerCase().replace(/\s+/g,'.');   // "Ajay Kumar" -> "ajay.kumar"
 const APP_NAME='Production Planning';
 const APP_SUB='Day-wise plan, execution & plan adherence';
-function showLogin(msg){
+function showLogin(msg, keep){
   const fb=Store.mode==='firebase';
   $('#root').innerHTML=`<div class="login"><form id="lf" autocomplete="off">
     <div class="glow"></div><h1>${APP_NAME} – day-wise</h1>
     <div class="sub">${esc(S.cfg.settings.plantName)} · ${APP_SUB}</div>
     ${msg?`<div class="banner bad">${esc(msg)}</div>`:''}
-    <label class="field">User name<input id="lu" required autocapitalize="off"></label>
-    <label class="field">${fb?'Password':'PIN'}<input id="lp" type="password" ${fb?'':'inputmode="numeric"'} required></label>
+    <label class="field">User name<input id="lu" required autocapitalize="off" value="${esc((keep&&keep.u)||'')}" placeholder="e.g. ajay"></label>
+    <label class="field">${fb?'Password (at least 6 characters)':'PIN'}<input id="lp" type="password" ${fb?'':'inputmode="numeric"'} required value="${esc((keep&&keep.p)||'')}"></label>
     <button class="btn" type="submit">Sign in</button>
     ${fb?'<button class="btn ghost sm" type="button" id="lsetup">First-time setup: create the administrator</button>':''}
     ${Store.mode==='folder'?`<div class="small muted">Data folder: <b>${esc(Store.dir.name)}</b> · <a href="#" id="lchg">change</a></div>`:''}
     ${!fb && S.cfg.users.some(u=>u.demo)?'<div class="small muted">Trial accounts: admin, mgmt, ht, ko – PIN 1234. The administrator should change or remove them before go-live.</div>':''}
   </form></div>`;
   $('#lf').onsubmit=async e=>{ e.preventDefault();
-    const un=$('#lu').value.trim().toLowerCase(), pin=$('#lp').value;
+    const un=normUser($('#lu').value), pin=$('#lp').value;
     if(fb){
       try{ await Store.auth.signInWithEmailAndPassword(un+'@'+LOGIN_DOMAIN, pin); }
-      catch(err){ showLogin(/password|credential|user-not-found|invalid/i.test(err.code||err.message)?'User name or password is not correct.':'Sign-in failed: '+err.message); }
+      catch(err){ showLogin(/api-key/i.test(err.code||err.message)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.':/operation-not-allowed/i.test(err.code||'')?'Email/Password sign-in is not enabled in Firebase (Authentication › Sign-in method).':/password|credential|user-not-found|invalid/i.test(err.code||err.message)?'User name or password is not correct.':'Sign-in failed: '+(err.code||err.message), {u:$('#lu').value}); }
       return;
     }
     const u=S.cfg.users.find(x=>x.username.toLowerCase()===un);
@@ -788,9 +789,10 @@ async function afterFbSignIn(fu){
   }catch(e){ console.error(e); S.loginMsg='Could not open the database: '+e.message+'. Check the Firestore security rules.'; await Store.auth.signOut(); }
 }
 async function fbFirstSetup(){
-  const un=$('#lu').value.trim().toLowerCase(), pw=$('#lp').value;
-  if(!/^[a-z0-9._-]{3,30}$/.test(un)) return showLogin('Enter an administrator user name (3–30 letters or digits) and a password, then click First-time setup.');
-  if(pw.length<6) return showLogin('The password must have at least 6 characters.');
+  const raw=$('#lu').value, un=normUser(raw), pw=$('#lp').value, keep={u:raw,p:pw};
+  if(!un) return showLogin('First type a user name (e.g. ajay) and a password in the boxes above, then click First-time setup.', keep);
+  if(!/^[a-z0-9._-]{3,30}$/.test(un)) return showLogin('User name “'+raw+'” is not allowed. Use 3–30 letters or digits, e.g. ajay or ajay.kumar (no @ or special characters).', keep);
+  if(pw.length<6) return showLogin('The password must have at least 6 characters (you typed '+pw.length+').', keep);
   S.busySetup=true;
   try{
     const cred=await Store.auth.createUserWithEmailAndPassword(un+'@'+LOGIN_DOMAIN, pw);
@@ -800,7 +802,13 @@ async function fbFirstSetup(){
     await Store.set('config', cfg);
     S.busySetup=false; await afterFbSignIn(cred.user);
     await audit('First-time setup', 'Administrator '+un+' created');
-  }catch(e){ S.busySetup=false; showLogin(e.code==='auth/email-already-in-use'?'That user name already exists. Sign in instead.':'Setup failed: '+e.message); }
+  }catch(e){ S.busySetup=false; const c=e.code||'';
+    showLogin(c==='auth/email-already-in-use'?'That user name already exists. Click Sign in. (If sign-in then says “not authorised”, delete the user in Firebase › Authentication › Users and run First-time setup again.)'
+      :/operation-not-allowed/.test(c)?'Email/Password sign-in is not enabled. Firebase › Authentication › Sign-in method › Email/Password › Enable, then try again.'
+      :/api-key/.test(c)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.'
+      :/permission|insufficient/i.test(c+' '+e.message)?'The database refused access. Firebase › Firestore › Rules: paste firestore.rules and Publish. Then delete the half-created user (Authentication › Users) and try again.'
+      :/unauthorized-domain/.test(c)?'This web address is not allowed. Firebase › Authentication › Settings › Authorized domains › add your github.io address.'
+      :'Setup failed: '+(c?c+' – ':'')+e.message, keep); }
 }
 let secondaryApp=null;
 async function fbCreateAccount(username, pw){          // a second Firebase app instance keeps the administrator signed in
@@ -2047,7 +2055,7 @@ async function saveUsers(rows){
   if(Store.mode!=='firebase') return rows.map(u=>{ const x={...u}; if(x.__pin){ x.pin=pinHash(x.username,x.__pin); delete x.demo; } delete x.__pin; delete x.pinNew; return x; });
   const out=[];
   for(const u of rows){
-    const x={...u}; x.username=x.username.toLowerCase();
+    const x={...u}; x.username=normUser(x.username);
     if(!x.uid){ try{ x.uid=await fbCreateAccount(x.username, x.__pin); }
       catch(e){ throw new Error('Could not create '+x.username+': '+(e.code==='auth/email-already-in-use'?'that user name already has an account (it may belong to a deleted user – choose another name).':e.message)); } }
     else if(x.__pin && x.username===S.user.username){ try{ await Store.auth.currentUser.updatePassword(x.__pin); }catch(e){ throw new Error('Password not changed: '+(e.code==='auth/requires-recent-login'?'sign out, sign in again and retry.':e.message)); } }
@@ -2067,7 +2075,7 @@ function validateMaster(tab, rows){
     for(const r of rows){ const st=routeSteps(r); if(!r.name) return 'Every routing rule needs a name.'; if(st.length<1) return 'Rule '+r.name+' has no stages.';
       const bad=st.filter(x=>!ids.has(x)); if(bad.length) return 'Rule '+r.name+': unknown process ID '+bad.join(', ')+'.'; if(new Set(st).size!==st.length) return 'Rule '+r.name+' lists a stage twice.'; } }
   if(tab==='Furnaces'){ if(rows.some(r=>!r.id||!(+r.capacityKg>0))) return 'Every furnace needs an ID and a capacity.'; }
-  if(tab==='Users'){ const un=rows.map(r=>(r.username||'').toLowerCase()); if(un.some(x=>!x)) return 'Every user needs a user name.'; if(new Set(un).size!==un.length) return 'User names must be unique.';
+  if(tab==='Users'){ rows.forEach(r=>{ r.username=normUser(r.username); }); const un=rows.map(r=>r.username); if(un.some(x=>!x)) return 'Every user needs a user name.'; if(new Set(un).size!==un.length) return 'User names must be unique.';
     if(!rows.some(r=>r.role==='Admin')) return 'Keep at least one Admin.';
     if(rows.some(r=>!/^[a-z0-9._-]{2,30}$/i.test(r.username))) return 'User names may use letters, digits, dot, dash and underscore only (no spaces).';
     if(Store.mode==='firebase'){ if(rows.some(r=>!r.uid && !(r.__pin && r.__pin.length>=6))) return 'Set a password of at least 6 characters for every new user.';
