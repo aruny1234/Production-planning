@@ -766,7 +766,7 @@ function showLogin(msg, keep){
     const un=normUser($('#lu').value), pin=$('#lp').value;
     if(fb){
       try{ await Store.auth.signInWithEmailAndPassword(un+'@'+LOGIN_DOMAIN, pin); }
-      catch(err){ showLogin(/api-key/i.test(err.code||err.message)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.':/operation-not-allowed/i.test(err.code||'')?'Email/Password sign-in is not enabled in Firebase (Authentication › Sign-in method).':/password|credential|user-not-found|invalid/i.test(err.code||err.message)?'User name or password is not correct.':'Sign-in failed: '+(err.code||err.message), {u:$('#lu').value}); }
+      catch(err){ showLogin(/api-key/i.test(err.code||err.message)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.':/operation-not-allowed/i.test(err.code||'')?'Email/Password sign-in is not enabled in Firebase (Authentication › Sign-in method).':/password|credential|user-not-found|invalid/i.test(err.code||err.message)?'User name or password is not correct. If no administrator exists yet, click “First-time setup” instead of Sign in. [code: '+(err.code||'?')+']':'Sign-in failed: '+(err.code||err.message), {u:$('#lu').value}); }
       return;
     }
     const u=S.cfg.users.find(x=>x.username.toLowerCase()===un);
@@ -803,12 +803,12 @@ async function fbFirstSetup(){
     S.busySetup=false; await afterFbSignIn(cred.user);
     await audit('First-time setup', 'Administrator '+un+' created');
   }catch(e){ S.busySetup=false; const c=e.code||'';
-    showLogin(c==='auth/email-already-in-use'?'That user name already exists. Click Sign in. (If sign-in then says “not authorised”, delete the user in Firebase › Authentication › Users and run First-time setup again.)'
+    showLogin(c==='auth/email-already-in-use'?'User name “'+un+'” already exists in Firebase. Sign in with the password used when it was created – or delete it in Firebase › Authentication › Users and run First-time setup again. (If sign-in then says “not authorised”, delete the user in Firebase › Authentication › Users and run First-time setup again.)'
       :/operation-not-allowed/.test(c)?'Email/Password sign-in is not enabled. Firebase › Authentication › Sign-in method › Email/Password › Enable, then try again.'
       :/api-key/.test(c)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.'
       :/permission|insufficient/i.test(c+' '+e.message)?'The database refused access. Firebase › Firestore › Rules: paste firestore.rules and Publish. Then delete the half-created user (Authentication › Users) and try again.'
       :/unauthorized-domain/.test(c)?'This web address is not allowed. Firebase › Authentication › Settings › Authorized domains › add your github.io address.'
-      :'Setup failed: '+(c?c+' – ':'')+e.message, keep); }
+      :'Setup failed: '+(c?c+' – ':'')+e.message, keep); console.error(e); }
 }
 let secondaryApp=null;
 async function fbCreateAccount(username, pw){          // a second Firebase app instance keeps the administrator signed in
