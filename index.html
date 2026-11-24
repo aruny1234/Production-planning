@@ -164,6 +164,10 @@ td.wrap{white-space:normal;min-width:180px;max-width:280px}
 .dtile{display:flex;flex-direction:column;gap:2px;min-width:112px;padding:7px 9px;border:1px solid var(--line);border-radius:var(--r-m);background:var(--soft)}
 .dtile b{font-size:15px}
 .dtile.lock{background:#EEF1F4;opacity:.8}
+.notif{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:8px;margin:0 12px 10px;padding:8px 10px;border:1px solid rgba(255,255,255,.25);border-radius:var(--r-m);cursor:pointer;color:#fff;font-size:13px}
+.notif:hover{background:rgba(255,255,255,.08)}
+.nbadge{margin-left:auto;background:var(--warn);color:#fff;border-radius:999px;padding:0 7px;font-size:12px;font-weight:600}
+.nbadge.bad{background:var(--bad)}
 
 </style>
 <script src="lib/chart.umd.min.js"></script>
@@ -781,13 +785,14 @@ function showLogin(msg, keep){
 async function getAccess(){ const d=await Store.db.collection(COLLECTION).doc('access').get(); return d.exists?d.data():null; }
 async function afterFbSignIn(fu){
   if(!Store.auth.currentUser || Store.auth.currentUser.uid!==fu.uid) return;   // stale event (account was just removed)
+  if(S.startedUid===fu.uid && S.user) return;                                    // already signed in (avoid starting twice)
   try{
     const acc=await getAccess();
     const role=acc && acc.uids && acc.uids[fu.uid];
     if(!role){ S.loginMsg='This account is not authorised. Ask the administrator.'; await Store.auth.signOut(); return; }
     await loadConfig();
     const rec=S.cfg.users.find(u=>u.uid===fu.uid) || {name:fu.email.split('@')[0], username:fu.email.split('@')[0], processes:[]};
-    S.user={...rec, role}; startApp();
+    S.user={...rec, role}; S.startedUid=fu.uid; startApp();
   }catch(e){ console.error(e); S.loginMsg='Could not open the database: '+e.message+'. Check the Firestore security rules.'; await Store.auth.signOut(); }
 }
 const DEFAULT_ADMIN_PW='Admin@123';
@@ -866,14 +871,17 @@ async function startApp(){
   if(!allowed.some(n=>n.id===S.view)) S.view=allowed[0].id;
   $('#root').innerHTML=`<div class="shell"><nav class="rail" aria-label="Main">
     <div class="brand"><b>${APP_NAME}</b><span>Day-wise · ${esc(S.cfg.settings.plantName)}</span></div>
+    <button class="notif" id="notif" type="button"></button>
     <div class="nav" id="nav"></div>
     <div class="who"><b>${esc(S.user.name)}</b>${esc(S.user.role)}${S.user.processes&&S.user.processes.length?' · '+S.user.processes.map(esc).join(', '):''}
       <br><span>${Store.mode==='local'?'Trial mode (this browser)':Store.mode==='folder'?'Data folder: '+esc(Store.dir.name):'Shared database'}</span><br><button id="lref">Refresh data</button> <button id="lpw">Change password</button> <button id="lo">Sign out</button></div></nav>
     <main id="main"></main></div>`;
   $('#lref').onclick=async()=>{ S.loadedAt=0; go(S.view); };
+  $('#notif').onclick=()=>openNotices();
   $('#lpw').onclick=()=>changeMyPassword();
-  $('#lo').onclick=async()=>{ sessionStorage.removeItem('wipUser'); sessionStorage.removeItem('ppDefaultPw'); S.user=null; if(Store.mode==='firebase') await Store.auth.signOut(); else showLogin(); };
+  $('#lo').onclick=async()=>{ S.startedUid=null; sessionStorage.removeItem('wipUser'); sessionStorage.removeItem('ppDefaultPw'); S.user=null; if(Store.mode==='firebase') await Store.auth.signOut(); else showLogin(); };
   renderNav(); go(S.view);
+  if(setupNotices().some(x=>x.level==='bad')) setTimeout(openNotices,400);
 }
 function renderNav(){
   $('#nav').innerHTML=NAV.filter(n=>n.sep||n.roles.includes(S.user.role)).map(n=>n.sep?'<div class="sep"></div>':`<button data-v="${n.id}" ${n.id===S.view?'aria-current="page"':''}>${esc(n.label)}</button>`).join('');
@@ -881,28 +889,46 @@ function renderNav(){
 }
 function go(v){
   S.view=v; S.charts.forEach(c=>c.destroy()); S.charts=[];
-  renderNav(); const m=$('#main'); m.innerHTML='';
+  renderNav(); renderNotifBell(); const m=$('#main'); m.innerHTML='';
   if(Store.mode!=='local' && Date.now()-(S.loadedAt||0)>120000){ m.innerHTML='<div class="empty">Refreshing data…</div>'; loadAll().then(()=>go(v)).catch(e=>toast('Refresh failed: '+e.message,true)); return; }   // other users' entries
   const fn={dashboard:vDashboard,wip:vWip,plan:vPlan,exec:vExec,ht:vHT,htdash:vHTDash,upload:vUpload,masters:vMasters,history:vHistory}[v];
   Promise.resolve(fn(m)).catch(e=>{ console.error(e); m.innerHTML+=`<div class="banner bad">This screen hit an error: ${esc(e.message)}</div>`; });
   window.scrollTo(0,0);
 }
 function head(title, sub, right=''){ return `<div class="topline"><div><h1>${esc(title)}</h1>${sub?`<div class="sub">${sub}</div>`:''}</div><div class="row">${right}</div></div>`; }
-function setupBanners(){
-  const out=[];
-  if(Store.mode==='local') out.push('<div class="banner info">Trial mode: data is stored in this browser only. For shop-floor users on several PCs, set DATA_STORAGE to \'folder\' or add the Firebase configuration at the top of index.html.</div>');
-  if(S.user.role==='Admin'){
-    if(Store.mode==='firebase' && sessionStorage.getItem('ppDefaultPw')) out.push('<div class="banner bad">You are using the default password '+DEFAULT_ADMIN_PW+'. Change it now: click <b>Change password</b> at the bottom-left.</div>');
-    if(Store.mode!=='firebase' && S.cfg.users.some(u=>u.demo)) out.push('<div class="banner warn">Trial accounts with PIN 1234 are still active. Change or delete them in Masters › Users before go-live.</div>');
+/* setup reminders are collected in ONE notification panel (bell at the top of the menu) instead of banners on every screen */
+function setupNotices(){
+  const out=[]; const add=(level,title,text,action,label)=>out.push({level,title,text,action,label});
+  const toMaster=t=>()=>{ S.ui.mTab=t; go('masters'); };
+  if(Store.mode==='firebase' && sessionStorage.getItem('ppDefaultPw')) add('bad','Change the default password','You signed in with '+DEFAULT_ADMIN_PW+'. Anyone who knows it could sign in as administrator.',()=>changeMyPassword(),'Change password');
+  if(Store.mode==='local') add('info','Trial mode','Data is stored in this browser only. Use the network-folder or Firebase version for real use.');
+  if(S.user && S.user.role==='Admin'){
+    if(Store.mode!=='firebase' && S.cfg.users.some(u=>u.demo)) add('warn','Trial accounts still active','Accounts with PIN 1234 exist. Change or remove them before go-live.',toMaster('Users'),'Open Users');
     const noLT=sortedProcs().filter(p=>p.active && !S.cfg.leadTimes.some(l=>l.processId===p.id && l.status!=='Inactive' && !l.metallurgy && !l.part));
-    if(noLT.length) out.push(`<div class="banner warn">No approved lead time for ${noLT.map(p=>esc(p.id+' '+p.name)).join(', ')}. Delay status shows “LT not set” for them until you enter a stage lead time in Masters › Lead times.</div>`);
+    if(noLT.length) add('warn','Lead time missing for '+noLT.length+' stage(s)',noLT.map(p=>p.id+' '+p.name).join(', ')+'. Their delay status shows “LT not set”.',toMaster('Lead times'),'Open Lead times');
     const draft=S.cfg.recipes.filter(r=>r.status==='Draft');
-    if(draft.length) out.push(`<div class="banner warn">${draft.length} HT recipe(s) are in Draft, so their castings cannot be loaded to a furnace yet. Review the cycle times and approve them in Masters › HT recipes (or with the Approve button in HT planning).</div>`);
-    if(routingOn() && !(S.cfg.routes||[]).some(r=>r.active!==false && !r.part && !r.metallurgy && !r.customer)) out.push('<div class="banner warn">Routing mode is on but there is no general route (a rule without Part / Metallurgy / Customer). Items not matching a special rule cannot move to their next stage. Add one in Masters › Routing.</div>');
+    if(draft.length) add('warn',draft.length+' HT recipe(s) in Draft',draft.map(r=>r.name).join(', ')+'. Castings with these metallurgies cannot be loaded to a furnace until approved.',toMaster('HT recipes'),'Open HT recipes');
+    if(routingOn() && !(S.cfg.routes||[]).some(r=>r.active!==false && !r.part && !r.metallurgy && !r.customer)) add('warn','No general route','Routing mode is on, but no route without Part / Metallurgy / Customer exists, so some castings cannot move on.',toMaster('Routing'),'Open Routing');
     const inactiveNew=S.cfg.processes.filter(p=>p.autoAdded && !p.active);
-    if(inactiveNew.length) out.push(`<div class="banner warn">New process area(s) found in Synchro: ${inactiveNew.map(p=>esc(p.synchroName||p.id)).join(', ')}. Configure and activate them in Masters › Processes.</div>`);
+    if(inactiveNew.length) add('warn','New process area(s) from Synchro',inactiveNew.map(p=>p.synchroName||p.id).join(', ')+' – configure and activate them.',toMaster('Processes'),'Open Processes');
+    if(!S.wipMeta) add('info','No Synchro WIP loaded','Upload the Master WIP export to start planning.',()=>go('upload'),'Upload WIP');
   }
-  return out.join('');
+  return out;
+}
+function setupBanners(){ return ''; }     // kept for older calls – reminders now live in the notification panel
+function renderNotifBell(){
+  const b=$('#notif'); if(!b) return; const n=setupNotices(); const urgent=n.some(x=>x.level==='bad');
+  b.innerHTML=`<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style="flex:none"><path fill="currentColor" d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 0 0-5.5-6.84V3a1.5 1.5 0 0 0-3 0v1.16A7 7 0 0 0 5 11v5l-2 2v1h18v-1Z"/></svg><span>Notifications</span>${n.length?`<span class="nbadge ${urgent?'bad':''}">${n.length}</span>`:''}`;
+  b.setAttribute('aria-label','Notifications: '+n.length);
+}
+function openNotices(){
+  if(document.getElementById('notifDlg')) return;
+  const n=setupNotices();
+  const d=modal('Notifications ('+n.length+')', n.length? n.map((x,i)=>`<div class="banner ${x.level}" style="display:flex;gap:12px;align-items:flex-start;justify-content:space-between">
+      <div><b>${esc(x.title)}</b><div class="small" style="margin-top:2px">${esc(x.text)}</div></div>${x.action?`<button class="btn sm ${x.level==='bad'?'heat':'ghost'}" data-na="${i}" style="flex:none">${esc(x.label)}</button>`:''}</div>`).join('')
+    : '<div class="empty">All set – no open setup items.</div>', []);
+  d.id='notifDlg';
+  d.querySelectorAll('[data-na]').forEach(btn=>btn.onclick=()=>{ d.close(); d.remove(); n[+btn.dataset.na].action(); });
 }
 /* every user can change his own password (Firebase asks for the current one first, for security) */
 function changeMyPassword(){
@@ -2080,6 +2106,7 @@ function vMasters(m){
   m.querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{ S.ui.mTab=b.dataset.t; go('masters'); });
   const mb=$('#mb');
   if(tab==='Lead times') return vLeadTimes(mb);
+  if(tab==='Users') return vUsers(mb);
   if(tab==='Routing') return vRouting(mb);
   if(tab==='Reasons'){
     mb.innerHTML=`<div class="panel"><p class="small muted">One shortfall reason per line. These appear in the execution screens and the Pareto.</p><textarea id="rsn" rows="14" style="width:100%">${esc(S.cfg.reasons.join('\n'))}</textarea><div class="row" style="margin-top:10px"><button class="btn" id="rsave">Save reasons</button></div></div>`;
@@ -2295,6 +2322,103 @@ function vRouting(mb){
       derive(); toast('Routing saved.'); go('masters'); };
   };
   render();
+}
+
+/* ===================== USERS – user management screen ===================== */
+const ROLE_INFO={ 'Admin':'Everything: masters, users, Synchro upload, publishing plans, all dashboards.',
+  'Department User':'Sees the plan of his process(es) and enters actuals. Cannot change masters.',
+  'HT User':'Builds and runs furnace loads for Heat Treatment, enters HT actuals.',
+  'Management':'Read-only: dashboards, WIP status, plans, history.' };
+function vUsers(mb){
+  const fb=Store.mode==='firebase'; const users=S.cfg.users||[];
+  const roleChip=r=>`<span class="chip ${r==='Admin'?'heat':r==='Management'?'blue':r==='HT User'?'warn':'ok'}">${esc(r)}</span>`;
+  const procChips=u=>(u.role==='Admin'||u.role==='Management')?'<span class="muted small">all processes</span>':((u.processes||[]).length?(u.processes||[]).map(id=>`<span class="chip mute">${esc(id+' '+procName(id))}</span>`).join(' '):'<span class="chip bad">none – edit</span>');
+  mb.innerHTML=`<div class="row" style="justify-content:space-between;margin-bottom:10px"><div><b>${users.length} user(s)</b> <span class="small muted">· each person signs in with his own user name and password${fb?'':' (PIN)'} and can change it with “Change password” (bottom-left).</span></div>
+      <button class="btn heat" id="uadd">+ Add user</button></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>User name (login)</th><th>Role</th><th>Processes</th><th></th></tr></thead><tbody>
+    ${users.map((u,i)=>`<tr><td><b>${esc(u.name||'')}</b>${u.username===S.user.username?' <span class="small muted">(you)</span>':''}</td><td class="num">${esc(u.username)}</td><td>${roleChip(u.role)}</td><td style="white-space:normal">${procChips(u)}</td>
+      <td class="row" style="flex-wrap:nowrap;justify-content:flex-end"><button class="btn ghost sm" data-uedit="${i}">Edit</button>${!fb && u.username!==S.user.username?`<button class="btn ghost sm" data-upin="${i}">Set new PIN</button>`:''}${u.username!==S.user.username?`<button class="btn danger sm" data-udel="${i}">Remove</button>`:''}</td></tr>`).join('')}</tbody></table></div>
+    <div class="grid g2" style="margin-top:14px">${Object.entries(ROLE_INFO).map(([r,t])=>`<div class="small">${roleChip(r)} ${esc(t)}</div>`).join('')}</div>
+    ${fb?`<p class="small muted" style="margin-top:12px">Forgotten password: remove the user here, delete <i>username</i>@prodplan.local in Firebase › Authentication › Users, then add the user again with a new password.</p>`:''}`;
+  $('#uadd').onclick=()=>userDialog(null);
+  mb.querySelectorAll('[data-uedit]').forEach(b=>b.onclick=()=>userDialog(+b.dataset.uedit));
+  mb.querySelectorAll('[data-udel]').forEach(b=>b.onclick=()=>removeUser(+b.dataset.udel));
+  mb.querySelectorAll('[data-upin]').forEach(b=>b.onclick=()=>setUserPin(+b.dataset.upin));
+}
+function userDialog(idx){
+  const fb=Store.mode==='firebase'; const isNew=idx===null; const u=isNew?{name:'',username:'',role:'Department User',processes:[]}:{...S.cfg.users[idx]};
+  const me=!isNew && u.username===S.user.username;
+  const procs=sortedProcs().filter(p=>p.active);
+  const d=modal(isNew?'Add user':'Edit user – '+u.username, `
+    <div class="grid g2">
+      <label class="field">Full name *<input id="un_name" value="${esc(u.name)}" placeholder="e.g. Rahul Sharma"></label>
+      <label class="field">User name (login) *<input id="un_user" value="${esc(u.username)}" ${isNew?'':'disabled'} placeholder="e.g. rahul" autocomplete="off"><span class="small muted" id="un_userhint">${isNew?'Small letters/digits, no spaces – suggested from the name.':'The login name cannot be changed.'}</span></label>
+    </div>
+    <label class="field" style="margin-top:10px">Role *<select id="un_role" ${me?'disabled':''}>${Object.keys(ROLE_INFO).map(r=>`<option ${r===u.role?'selected':''}>${r}</option>`).join('')}</select><span class="small muted" id="un_rinfo"></span></label>
+    <div id="un_pbox" style="margin-top:10px"><div class="field">Processes * <span class="small muted">(what this person plans / enters)</span></div>
+      <div class="grid g3" style="gap:4px;margin-top:4px">${procs.map(p=>`<label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-up="${p.id}" ${(u.processes||[]).includes(p.id)?'checked':''}> <b>${esc(p.id)}</b> ${esc(p.name)}${p.type==='HT'?' <span class="chip heat">HT</span>':''}</label>`).join('')}</div></div>
+    ${isNew?`<div class="grid g2" style="margin-top:10px">
+      <label class="field">${fb?'Password (at least 6 characters)':'PIN'} *<input type="password" id="un_pw" autocomplete="new-password"></label>
+      <label class="field">Repeat ${fb?'password':'PIN'} *<input type="password" id="un_pw2" autocomplete="new-password"></label></div>
+      <label class="small"><input type="checkbox" id="un_show"> Show ${fb?'password':'PIN'}</label>`:''}
+    <div id="un_msg" class="small" style="color:var(--bad);margin-top:10px;font-weight:600"></div>`,
+    [{label:isNew?'Create user':'Save changes', cls:'heat', fn:async dd=>{
+      const msg=t=>{ dd.querySelector('#un_msg').textContent=t; return false; };
+      const name=dd.querySelector('#un_name').value.trim(); const role=dd.querySelector('#un_role').value;
+      const username=isNew?normUser(dd.querySelector('#un_user').value):u.username;
+      const processes=[...dd.querySelectorAll('[data-up]:checked')].map(x=>x.dataset.up);
+      if(!name) return msg('Type the full name.');
+      if(isNew){
+        if(!/^[a-z0-9._-]{3,30}$/.test(username)) return msg('User name: 3–30 small letters or digits (dot, dash allowed), no spaces.');
+        if(S.cfg.users.some(x=>x.username===username)) return msg('User name “'+username+'” is already used – choose another.');
+      }
+      if((role==='Department User'||role==='HT User') && !processes.length) return msg('Tick at least one process for this role.');
+      if(!me && role!=='Admin' && u.role==='Admin' && S.cfg.users.filter(x=>x.role==='Admin').length<2) return msg('Keep at least one Admin.');
+      let pw='';
+      if(isNew){ pw=dd.querySelector('#un_pw').value; const pw2=dd.querySelector('#un_pw2').value;
+        if(fb && pw.length<6) return msg('Password: at least 6 characters.'); if(!fb && !pw) return msg('Type a PIN.'); if(pw!==pw2) return msg('The two passwords are not the same.'); }
+      const btn=[...dd.querySelectorAll('.dlg-f button')].pop(); btn.disabled=true; btn.textContent='Saving…';
+      try{
+        const rec={...u, name, role, processes:(role==='Admin'||role==='Management')?[]:processes};
+        if(isNew){
+          rec.id=uidGen('U'); rec.username=username;
+          if(fb){ try{ rec.uid=await fbCreateAccount(username,pw); }
+            catch(e){ if(e.code!=='auth/email-already-in-use') throw e;
+              try{ rec.uid=await fbAdoptAccount(username,pw); }
+              catch(e2){ btn.disabled=false; btn.textContent='Create user'; return msg('“'+username+'” already has a login in Firebase with another password (left from an earlier try). Use the same password as last time, or delete '+username+'@prodplan.local in Firebase › Authentication › Users, or choose another user name.'); } } }
+          else rec.pin=pinHash(username,pw);
+        }
+        delete rec.demo; delete rec.pinNew;
+        await saveConfig(c=>{ if(isNew) c.users.push(rec); else { const k=c.users.findIndex(x=>x.username===u.username); c.users[k]={...c.users[k],...rec}; } }, (isNew?'User added: ':'User changed: ')+rec.username+' ('+rec.role+(rec.processes.length?' '+rec.processes.join(','):'')+')');
+        if(fb){ const uids={}; S.cfg.users.forEach(x=>{ if(x.uid) uids[x.uid]=x.role; }); await setAccess(uids); }
+        if(me) S.user={...S.user, name};
+        toast(isNew?'User '+rec.username+' created. Give him the user name and password.':'Saved.'); go('masters');
+      }catch(e){ btn.disabled=false; btn.textContent=isNew?'Create user':'Save changes'; return msg('Not saved: '+(e.code||e.message)); }
+    }}]);
+  const role=d.querySelector('#un_role'), pbox=d.querySelector('#un_pbox'), info=d.querySelector('#un_rinfo');
+  const upd=()=>{ info.textContent=ROLE_INFO[role.value]; pbox.hidden=(role.value==='Admin'||role.value==='Management');
+    if(role.value==='HT User'){ const ht=htProc(); if(ht){ const cb=d.querySelector(`[data-up="${ht.id}"]`); if(cb && !d.querySelectorAll('[data-up]:checked').length) cb.checked=true; } } };
+  role.onchange=upd; upd();
+  if(isNew){ const nm=d.querySelector('#un_name'), us=d.querySelector('#un_user'); let touched=false;
+    us.oninput=()=>{ touched=true; }; nm.oninput=()=>{ if(!touched) us.value=normUser(nm.value.split(' ')[0]||''); };
+    d.querySelector('#un_show').onchange=e=>{ ['#un_pw','#un_pw2'].forEach(s=>d.querySelector(s).type=e.target.checked?'text':'password'); }; }
+}
+function removeUser(idx){
+  const fb=Store.mode==='firebase'; const u=S.cfg.users[idx];
+  modal('Remove user '+u.username, `<p>${esc(u.name)} (<b>${esc(u.username)}</b>, ${esc(u.role)}) will lose access immediately. History (plans, actuals, audit) is kept.</p>
+    ${fb?`<p class="small muted">To use the same user name again later, also delete <b>${esc(u.username)}@prodplan.local</b> in Firebase › Authentication › Users.</p>`:''}`,
+    [{label:'Remove user', cls:'danger', fn:async()=>{
+      if(u.role==='Admin' && S.cfg.users.filter(x=>x.role==='Admin').length<2){ toast('Keep at least one Admin.',true); return false; }
+      await saveConfig(c=>{ c.users=c.users.filter(x=>x.username!==u.username); }, 'User removed: '+u.username);
+      if(fb){ const uids={}; S.cfg.users.forEach(x=>{ if(x.uid) uids[x.uid]=x.role; }); await setAccess(uids); }
+      toast('User '+u.username+' removed.'); go('masters'); }}]);
+}
+function setUserPin(idx){
+  const u=S.cfg.users[idx];
+  modal('New PIN for '+u.username, `<label class="field">New PIN<input type="password" id="np1"></label><label class="field" style="margin-top:8px">Repeat<input type="password" id="np2"></label><div id="npm" class="small" style="color:var(--bad)"></div>`,
+    [{label:'Set PIN', cls:'heat', fn:async d=>{ const a=d.querySelector('#np1').value, b=d.querySelector('#np2').value;
+      if(!a || a!==b){ d.querySelector('#npm').textContent='Type the same PIN twice.'; return false; }
+      await saveConfig(c=>{ const x=c.users.find(y=>y.username===u.username); x.pin=pinHash(u.username,a); delete x.demo; }, 'PIN reset for '+u.username); toast('PIN changed for '+u.username+'.'); go('masters'); }}]);
 }
 
 
