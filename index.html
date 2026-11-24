@@ -636,11 +636,17 @@ async function loadPlannedKeys(){
 async function loadReported(){
   S.reported={};
   if(!S.wipMeta || routingOn()) return;      // routing mode: completed qty has already left the stage
-  const from=E.addDays(S.wipMeta.snapshotDate, -(+S.cfg.settings.postingLag||0)); const to=E.todayISO();
-  const dates=[]; for(let d=from; d<=to && dates.length<8; d=E.addDays(d,1)) dates.push(d);
+  const lagFrom=E.addDays(S.wipMeta.snapshotDate, -(+S.cfg.settings.postingLag||0)); const to=E.todayISO();
+  const from=E.addDays(to,-21);               // back-dated bookings (e.g. booked today for 2 days ago) are found too
+  const dates=[]; for(let d=from; d<=to; d=E.addDays(d,1)) dates.push(d);
   const paths=[]; dates.forEach(d=>S.cfg.processes.forEach(p=>paths.push('exec/'+d+'/'+p.id)));
   const docs=await Store.getMany(paths);
-  docs.forEach(doc=>{ if(!doc) return; (doc.lines||[]).forEach(l=>{ if(doc.status==='Submitted'||l.batchId||(l.source&&l.source!=='day')) S.reported[l.key]=(S.reported[l.key]||0)+(+l.actualQty||0); }); });
+  const upAt=pid=>{ const ps=S.wipMeta.procSnap&&S.wipMeta.procSnap[pid]; return (ps&&ps.at)||S.wipMeta.uploadedAt||''; };
+  docs.forEach(doc=>{ if(!doc) return; (doc.lines||[]).forEach(l=>{
+    const counts=doc.status==='Submitted'||l.batchId||(l.source&&l.source!=='day'); if(!counts || !(+l.actualQty>0)) return;
+    const recorded=l.bookedAt||doc.submittedAt||'';
+    const afterUpload=recorded && upAt(doc.processId) && recorded>upAt(doc.processId);
+    if(afterUpload || doc.date>=lagFrom) S.reported[l.key]=(S.reported[l.key]||0)+(+l.actualQty||0); }); });
 }
 function derive(){
   const today=E.todayISO(), amber=+S.cfg.settings.amberDays||0;
@@ -1173,7 +1179,7 @@ async function showUploadPreview(p){
     const tile=(n,l,c,id)=>`<button class="kpi" data-ul="${id}" style="text-align:left;cursor:pointer;border:1px solid var(--line)"><div class="v num ${c||''}">${fmt(n)}</div><div class="l">${l}</div></button>`;
     const list=(arr,extra)=>arr.length?`<div class="tbl-wrap" style="max-height:260px"><table><thead><tr><th>Process</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th class="r">Qty</th>${extra?'<th>Note</th>':''}</tr></thead><tbody>${arr.slice(0,500).map(x=>{ const pid=x.processId||E.areaCode(x.area);
         return `<tr><td>${esc(pid)}</td><td><b>${esc(x.uid)}</b></td><td>${esc(x.job)}</td><td>${esc(x.die)}</td><td>${esc(x.desc)}</td><td class="r num">${fmt(x.qty)}</td>${extra?`<td class="small">${esc(extra(x))}</td>`:''}</tr>`; }).join('')}</tbody></table></div>`:'<div class="empty" style="padding:12px">None.</div>';
-    const mode0=S.ui.upMode||(routingOn()?'add':'update');
+    const mode0=S.ui.upMode||'add';
     $('#uprev').innerHTML=`<div class="banner info">Sheet “${esc(p.sheet)}”: ${fmt(rows.length)} WIP lines for ${[...new Set(rows.map(x=>E.areaCode(x.area)))].map(id=>esc(id+' '+procName(id))).join(', ')||'–'}.${other?` ${fmt(other)} lines of other processes are ignored.`:''}</div>
       <h3 style="margin-top:6px">Duplicate check before upload</h3>
       <div class="kpis" style="margin-bottom:10px">
@@ -1186,13 +1192,17 @@ async function showUploadPreview(p){
       <div class="panel" style="margin-top:10px;background:var(--soft)"><b>Upload mode</b>
         <label style="display:block;margin-top:6px"><input type="radio" name="umode" value="add" ${mode0==='add'?'checked':''}> <b>Add fresh UIDs only</b> – adds the ${fmt(A.fresh.length)} fresh lines; lines already in WIP and duplicates are skipped; nothing is removed.</label>
         <label style="display:block;margin-top:4px"><input type="radio" name="umode" value="update" ${mode0==='update'?'checked':''}> <b>Update the stage from this file</b> (daily refresh) – adds ${fmt(A.fresh.length)} fresh, keeps ${fmt(A.same.length)}, removes ${fmt(A.gone.length)} that are no longer in the file; duplicates inside the file are excluded.</label></div>
+      ${(()=>{ const tm=E.addDays(E.todayISO(),1); const np=pids.filter(id=>procById(id) && procById(id).type!=='HT' && Object.keys(S.planIdx||{}).some(d=>d>=tm && S.planIdx[d].includes(id)));
+         return np.length?`<div class="panel" style="margin-top:10px;background:var(--soft)"><label><input type="checkbox" id="urep" checked> <b>Re-plan the published days</b> of ${np.map(esc).join(', ')} from <input type="date" id="urfrom" value="${tm}" style="width:auto"> after the upload</label>
+           <div class="small muted" style="margin-top:4px">All open castings (old and new) are re-sequenced: carry-forward first, then delayed, then oldest Start Date. Each day is filled up to its capacity (e.g. 5 MT); newer castings move to later days. Days with entered actuals and lines already booked stay unchanged. The number of planned days stays the same.</div></div>`:''; })()}
       <div class="row" style="margin-top:14px"><button class="btn heat" id="ugo" ${rows.length||A.gone.length?'':'disabled'}>Upload</button><span class="small muted">The same UID can never appear twice in one process. Plans, actuals and history are not changed.</span></div>`;
     const lists={fresh:list(A.fresh), same:list(A.same), dupFile:list(A.dupFile,()=> 'second line with the same UID in this process – excluded'), other:list(A.otherStage,x=>'also in '+[...A.stageOf[normUID(x.uid)]].filter(pid=>pid!==E.areaCode(x.area)).map(pid=>pid+' '+procName(pid)).join(', ')), gone:list(A.gone,()=> 'removed only in “Update” mode')};
     const names={fresh:'Fresh UIDs',same:'Already in WIP',dupFile:'Duplicates inside the file (excluded)',other:'UID also in another stage',gone:'In app but not in file'};
     $('#uprev').querySelectorAll('[data-ul]').forEach(b=>b.onclick=()=>{ $('#ulist').innerHTML=`<h3>${names[b.dataset.ul]}</h3>`+lists[b.dataset.ul]; });
     $('#uprev').querySelectorAll('[name=umode]').forEach(r=>r.onchange=()=>{ S.ui.upMode=r.value; });
     if(A.dupFile.length) $('#ulist').innerHTML=`<h3>${names.dupFile}</h3>`+lists.dupFile;
-    $('#ugo').onclick=()=>commitStageUpload(p, A, pids, $('#ud').value||E.todayISO(), $('#uprev').querySelector('[name=umode]:checked').value, full && p.hasAreas);
+    $('#ugo').onclick=()=>commitStageUpload(p, A, pids, $('#ud').value||E.todayISO(), $('#uprev').querySelector('[name=umode]:checked').value, full && p.hasAreas,
+      $('#urep')&&$('#urep').checked ? ($('#urfrom').value||E.addDays(E.todayISO(),1)) : null);
     return;
   }
   p.rows=analyseUpload(p.rows, []).rowsU;        // routing mode: remove duplicates inside the file first
@@ -1215,7 +1225,7 @@ async function showUploadPreview(p){
   if($('#uinit')) $('#uinit').onchange=e=>{ $('#ugo').textContent=e.target.checked?'Initial load: replace app WIP with all stages':'Add new lines to WIP'; };
   $('#ugo').onclick=()=>commitUpload(p, $('#ud').value||E.todayISO(), {initial:!!($('#uinit')&&$('#uinit').checked), newRows});
 }
-async function commitStageUpload(p, A, pids, snapDate, mode, fullFile){
+async function commitStageUpload(p, A, pids, snapDate, mode, fullFile, replanFrom){
   const btn=$('#ugo'); btn.disabled=true; btn.textContent='Saving…';
   try{
     if(fullFile){ // new process areas from the Master WIP go into the master as inactive
@@ -1244,7 +1254,10 @@ async function commitStageUpload(p, A, pids, snapDate, mode, fullFile){
     await Store.update('uploads/'+snapDate.slice(0,4), d=>{ d=d||{list:[]}; d.list.push({ts:new Date().toISOString(), snapshotDate:snapDate, file:p.file, rows:rows.length, kg:rows.reduce((s,x)=>s+x.wt,0), by:S.user.username, mode:label, pids, stat}); return d; });
     await audit('Upload WIP', label+' '+pids.join(',')+': '+p.file+' – fresh '+stat.fresh+', kept '+stat.kept+', removed '+stat.removed+', duplicates in file excluded '+stat.dupInFile+(mode==='add'?', already in WIP skipped '+stat.skippedInWip:''));
     await loadAll(); await writeSnapshot(snapDate);
-    toast((mode==='add'?'Added '+stat.fresh+' fresh line(s)':'Stage updated: '+stat.fresh+' added, '+stat.removed+' removed')+(stat.dupInFile?' · '+stat.dupInFile+' duplicate(s) excluded':'')+'.'); go('wip');
+    let rp='';
+    if(replanFrom){ btn.textContent='Re-planning…'; rp=await replanAfterUpload(pids, replanFrom); }
+    toast((mode==='add'?'Added '+stat.fresh+' fresh line(s)':'Stage updated: '+stat.fresh+' added, '+stat.removed+' removed')+(stat.dupInFile?' · '+stat.dupInFile+' duplicate(s) excluded':'')+'.'+rp);
+    if(replanFrom){ S.ui.planMode='published'; S.ui.planDate=replanFrom; go('plan'); } else go('wip');
   }catch(e){ console.error(e); toast('Upload failed: '+e.message,true); btn.disabled=false; btn.textContent='Upload'; }
 }
 async function commitUpload(p, snapDate, opt){
@@ -1406,6 +1419,20 @@ async function parseBooking(){
     }catch(e){ console.error(e); toast('Booking failed: '+e.message,true); $('#bgo').disabled=false; $('#bgo').textContent='Book ticked lines'; } };
 }
 
+/* re-plan the published days of these stages from a date: same number of days, oldest Start Date first,
+   executed days and booked lines stay where they are */
+async function replanAfterUpload(pids, from){
+  const out=[];
+  for(const pid of pids){ const p=procById(pid); if(!p || p.type==='HT' || !p.active) continue;
+    const days=Object.keys(S.planIdx||{}).filter(d=>d>=from && S.planIdx[d].includes(pid)).sort(); if(!days.length) continue;
+    const prev=await buildPreview(from, days.length);
+    const written=await publishCore(from, prev, [pid]);
+    const left=(prev[pid].remaining||[]).reduce((s,e)=>s+e.qty*(e.item.unitWt||0),0);
+    out.push(pid+': '+written.length+' day(s)'+(left>0?', '+mt(left)+' MT beyond the plan horizon':''));
+  }
+  return out.length?' Re-planned '+out.join(' · ')+'.':'';
+}
+
 /* ===================== DAILY PLAN ===================== */
 const capFor=(pid,date)=>{ const o=S.cfg.capOverrides[date+'|'+pid]; const p=procById(pid); return o!==undefined&&o!==null&&o!==''? +o : (p&&p.capacityMT!==''&&p.capacityMT!==undefined ? +p.capacityMT : +S.cfg.settings.defaultCapMT||5); };
 /* Day-wise plan over several days. Castings already planned on an earlier day whose actuals are not submitted stay
@@ -1417,20 +1444,28 @@ async function buildPreview(start, nDays){
   const paths=[]; relDates.forEach(d=>idx[d].forEach(pid=>{ paths.push('plan/'+d+'/'+pid); paths.push('exec/'+d+'/'+pid); }));
   const docs=await Store.getMany(paths); const P={}, X={}; let k=0;
   relDates.forEach(d=>idx[d].forEach(pid=>{ P[d+'|'+pid]=docs[k++]; X[d+'|'+pid]=docs[k++]; }));
-  const hasActuals=(d,pid)=>{ const x=X[d+'|'+pid]; return !!(x && (x.status==='Submitted' || (x.lines||[]).some(l=>l.actualQty!==null&&l.actualQty!==undefined&&l.actualQty!==''))); };
+  const hasActuals=(d,pid)=>{ const x=X[d+'|'+pid]; return !!(x && (x.status==='Submitted' || (x.lines||[]).some(l=>(!l.source||l.source==='day') && l.actualQty!==null&&l.actualQty!==undefined&&l.actualQty!==''))); };
   const out={}; let endDate=start;
   for(const p of procs.filter(p=>p.type!=='HT')){
-    const reserved={...S.reported}; const reservedDays=[]; const locked={}; const replace=[];
+    const reserved={...S.reported}; const reservedDays=[]; const locked={}; const replace=[]; const fixed={};
     relDates.filter(d=>idx[d].includes(p.id)).forEach(d=>{
       const x=X[d+'|'+p.id]; const submitted=x && x.status==='Submitted';
-      if(d>=start){ if(hasActuals(d,p.id)) locked[d]=true; else { replace.push(d); return; } }
+      if(d>=start){ if(hasActuals(d,p.id)) locked[d]=true;
+        else { replace.push(d);                       // re-planned – but lines already booked (search / Synchro) stay on this day
+          const pl=P[d+'|'+p.id]; const fx=pl? pl.lines.filter(l=>(l.bookings||[]).length):[];
+          if(fx.length){ fixed[d]=fx; fx.forEach(l=>{ const open=Math.max(0,l.qty-bookedQty(l)); if(open) reserved[l.key]=(reserved[l.key]||0)+open; }); }
+          return; } }
       if(!submitted){ const pl=P[d+'|'+p.id]; if(pl){ pl.lines.forEach(l=>{ reserved[l.key]=(reserved[l.key]||0)+l.qty; }); if(d<start) reservedDays.push(d); } }
     });
     const items=wipFor(p.id);
     const cf=S.cfOpen.filter(c=>c.processId===p.id && (c.status==='Open' || (c.status==='Planned' && replace.includes(c.plannedOn))));
     const q=E.buildQueue(items, cf, reserved);
-    const pl=E.planNormal(p, q, start, nDays, S.cfg.holidays, d=>locked[d]?0:capFor(p.id,d));
-    const days=pl.days.map(d=>({ date:d.date, capKg:d.capKg, usedKg:d.usedKg, locked:!!d.locked, lines:d.lines.map((l,i)=>lineFrom(l.item,l.qty,l.kg,l.group,l.cfIds,i+1)) }));
+    const fixedOpenKg=d=>(fixed[d]||[]).reduce((s,l)=>s+Math.max(0,l.qty-bookedQty(l))*(+l.unitWt||0),0);   // still to be done on that day
+    const pl=E.planNormal(p, q, start, nDays, S.cfg.holidays, d=>locked[d]?0:Math.max(0.001, capFor(p.id,d)-fixedOpenKg(d)/1000));
+    const days=pl.days.map(d=>({ date:d.date, capKg:d.capKg, usedKg:d.usedKg+fixedOpenKg(d.date), locked:!!locked[d.date], fixed:fixed[d.date]||[],
+      lines:d.lines.map((l,i)=>lineFrom(l.item,l.qty,l.kg,l.group,l.cfIds,(fixed[d.date]||[]).length+i+1)) }));
+    Object.keys(fixed).forEach(d=>{ if(!days.some(x=>x.date===d)) days.push({date:d, capKg:capFor(p.id,d)*1000, usedKg:fixedOpenKg(d), locked:false, fixed:fixed[d], lines:[]}); });
+    days.sort((a,b)=>a.date<b.date?-1:1);
     days.forEach(d=>{ if(d.lines.length && d.date>endDate) endDate=d.date; });
     out[p.id]={ proc:p, days, remaining:pl.remaining, replace, reservedDays, wipKg:items.reduce((s,w)=>s+w.wt,0), plannableKg:q.reduce((s,e)=>s+e.qty*(e.item.unitWt||0),0) };
   }
@@ -1544,10 +1579,10 @@ async function vPlan(m){
 function planCard(pv, date){
   if(!pv) return '';
   const p=pv.proc; const days=pv.days||[]; const planned=days.filter(d=>d.lines.length);
-  const all=days.flatMap((d,i)=>d.lines.map(l=>({...l, day:d.date})));
+  const all=days.flatMap((d,i)=>[...(d.fixed||[]),...d.lines].map(l=>({...l, day:d.date})));
   const tot=all.reduce((s,l)=>s+l.kg,0);
-  const tiles=days.map((d,i)=>`<div class="dtile ${d.locked?'lock':''}"><span class="small muted">D${i+1} · ${WD[E.weekdayISO(d.date)]} ${fdate(d.date).slice(0,6)}</span><b class="num">${d.locked?'kept':mt(d.lines.reduce((s,l)=>s+l.kg,0))+' MT'}</b>
-      ${d.capKg?`<div class="bar"><i style="width:${Math.min(100,100*(d.usedKg||0)/d.capKg)}%"></i></div>`:''}<span class="small muted">${d.locked?'has actuals':d.lines.length+' lines'}</span></div>`).join('');
+  const tiles=days.map((d,i)=>`<div class="dtile ${d.locked?'lock':''}"><span class="small muted">D${i+1} · ${WD[E.weekdayISO(d.date)]} ${fdate(d.date).slice(0,6)}</span><b class="num">${d.locked?'kept':mt([...(d.fixed||[]),...d.lines].reduce((s,l)=>s+l.kg,0))+' MT'}</b>
+      ${d.capKg?`<div class="bar"><i style="width:${Math.min(100,100*(d.usedKg||0)/d.capKg)}%"></i></div>`:''}<span class="small muted">${d.locked?'has actuals':((d.fixed||[]).length?d.lines.length+' new + '+d.fixed.length+' booked':d.lines.length+' lines')}</span></div>`).join('');
   if(pv.ht) return `<div class="panel" style="margin-bottom:12px;border-left:4px solid var(--heat)"><div class="row" style="justify-content:space-between"><h3>${esc(p.id+' · '+p.name)} <span class="chip heat">Furnace loads</span></h3>
     <span class="small muted">${planned.reduce((s,d)=>s+d.batches.length,0)} load(s) · ${all.length} lines · ${mt(tot)} MT in this period</span></div>
     ${days.length?`<div class="dtiles">${tiles}</div><button class="btn ghost sm" data-tog="${p.id}" style="margin-top:8px">Show lines</button><div id="t${p.id}" hidden style="margin-top:8px">${planTable(all,true)}</div>`:'<div class="small muted">No furnace load starts in this period. Load castings to F1 or F2 in HT planning.</div>'}</div>`;
@@ -1569,33 +1604,39 @@ function delayChip(st,days){ if(!st) return ''; const c={'Delayed':'Delayed','Du
 
 async function publishPlan(start, prev){
   const btn=$('#pub'); btn.disabled=true; btn.textContent='Publishing…';
-  try{
-    const now=new Date().toISOString(); const written=[]; const removed=[]; const cfPlan={};
-    for(const p of sortedProcs().filter(p=>p.active)){
-      const pv=prev[p.id]; if(!pv) continue;
-      const newDates=[];
-      for(const d of pv.days){
-        if(d.locked || !d.lines.length) continue;
-        await Store.set('plan/'+d.date+'/'+p.id, {date:d.date, processId:p.id, processName:p.name, type:p.type, capKg:d.capKg, lines:d.lines, publishedAt:now, publishedBy:S.user.username, run:start});
-        newDates.push(d.date); written.push([d.date,p.id]);
-        d.lines.forEach(l=>(l.cfIds||[]).forEach(id=>{ if(!cfPlan[id]) cfPlan[id]=d.date; }));
-      }
-      for(const d of pv.replace) if(!newDates.includes(d)){ await Store.del('plan/'+d+'/'+p.id); removed.push([d,p.id]); }
-    }
-    const touched=new Set(written.concat(removed).map(x=>x[1]));
-    await updateCF(list=>{ list.forEach(c=>{
-      if(touched.has(c.processId) && c.status==='Planned' && c.plannedOn>=start && (prev[c.processId]||{}).replace && (prev[c.processId].replace.includes(c.plannedOn) || written.some(w=>w[0]===c.plannedOn&&w[1]===c.processId))){ c.status='Open'; delete c.plannedOn; }
-      if(cfPlan[c.id] && c.status==='Open'){ c.status='Planned'; c.plannedOn=cfPlan[c.id]; } }); });
-    await Store.update('planidx', d=>{ d=d||{dates:{}};
-      removed.forEach(([dt,pid])=>{ d.dates[dt]=(d.dates[dt]||[]).filter(x=>x!==pid); if(!d.dates[dt].length) delete d.dates[dt]; });
-      written.forEach(([dt,pid])=>{ d.dates[dt]=Array.from(new Set([...(d.dates[dt]||[]),pid])); }); return d; });
-    for(const [dt,pid] of written) await recomputeSummary(dt,pid);
-    for(const [dt,pid] of removed) await Store.update('sum/'+dt.slice(0,4), d=>{ if(d&&d.d[dt]) delete d.d[dt][pid]; return d||{d:{}}; }).then(()=>{ if(S.sums[dt]) delete S.sums[dt][pid]; });
-    const days=[...new Set(written.map(w=>w[0]))].sort();
-    await audit('Publish day-wise plan', 'From '+start+': '+days.length+' day(s) '+(days.length?days[0]+' → '+days[days.length-1]:'')+', '+written.length+' process-days'+(removed.length?', '+removed.length+' old process-days removed':''));
-    S.planIdx=((await Store.get('planidx'))||{dates:{}}).dates; await loadPlannedKeys(); derive();
+  try{ const days=await publishCore(start, prev);
     toast('Day-wise plan published: '+days.length+' day(s), '+(days.length?fdate(days[0])+' to '+fdate(days[days.length-1]):'')+'.'); S.ui.planMode='published'; go('plan');
   }catch(e){ console.error(e); toast('Publishing failed: '+e.message,true); btn.disabled=false; }
+}
+async function publishCore(start, prev, onlyPids){
+  const now=new Date().toISOString(); const written=[]; const removed=[]; const cfPlan={};
+  for(const p of sortedProcs().filter(p=>p.active)){
+    if(onlyPids && !onlyPids.includes(p.id)) continue;
+    const pv=prev[p.id]; if(!pv) continue;
+    const newDates=[];
+    for(const d of pv.days){
+      if(d.locked) continue;
+      const lines=[...(d.fixed||[]), ...d.lines]; if(!lines.length) continue;
+      lines.forEach((l,i)=>{ l.prio=i+1; });
+      await Store.set('plan/'+d.date+'/'+p.id, {date:d.date, processId:p.id, processName:p.name, type:p.type, capKg:d.capKg, lines, publishedAt:now, publishedBy:S.user.username, run:start});
+      newDates.push(d.date); written.push([d.date,p.id]);
+      lines.forEach(l=>(l.cfIds||[]).forEach(id=>{ if(!cfPlan[id]) cfPlan[id]=d.date; }));
+    }
+    for(const d of (pv.replace||[])) if(!newDates.includes(d)){ await Store.del('plan/'+d+'/'+p.id); removed.push([d,p.id]); }
+  }
+  const touched=new Set(written.concat(removed).map(x=>x[1]));
+  await updateCF(list=>{ list.forEach(c=>{
+    if(touched.has(c.processId) && c.status==='Planned' && c.plannedOn>=start && (prev[c.processId]||{}).replace && (prev[c.processId].replace.includes(c.plannedOn) || written.some(w=>w[0]===c.plannedOn&&w[1]===c.processId))){ c.status='Open'; delete c.plannedOn; }
+    if(cfPlan[c.id] && c.status==='Open'){ c.status='Planned'; c.plannedOn=cfPlan[c.id]; } }); });
+  await Store.update('planidx', d=>{ d=d||{dates:{}};
+    removed.forEach(([dt,pid])=>{ d.dates[dt]=(d.dates[dt]||[]).filter(x=>x!==pid); if(!d.dates[dt].length) delete d.dates[dt]; });
+    written.forEach(([dt,pid])=>{ d.dates[dt]=Array.from(new Set([...(d.dates[dt]||[]),pid])); }); return d; });
+  for(const [dt,pid] of written) await recomputeSummary(dt,pid);
+  for(const [dt,pid] of removed) await Store.update('sum/'+dt.slice(0,4), d=>{ if(d&&d.d[dt]) delete d.d[dt][pid]; return d||{d:{}}; }).then(()=>{ if(S.sums[dt]) delete S.sums[dt][pid]; });
+  const days=[...new Set(written.map(w=>w[0]))].sort();
+  await audit('Publish day-wise plan', (onlyPids?'Re-plan '+onlyPids.join(',')+' ':'')+'from '+start+': '+days.length+' day(s) '+(days.length?days[0]+' → '+days[days.length-1]:'')+', '+written.length+' process-days'+(removed.length?', '+removed.length+' old process-days removed':''));
+  S.planIdx=((await Store.get('planidx'))||{dates:{}}).dates; await loadPlannedKeys(); derive();
+  return days;
 }
 async function recomputeSummary(date,pid){
   const [p,x]=await Store.getMany(['plan/'+date+'/'+pid,'exec/'+date+'/'+pid]);
@@ -1849,8 +1890,6 @@ async function bookLines(entries, src){
   for(const c of closeCF) await applyCarryForward(c.date, c.pid, [c.line]);
   if(routingOn()) for(const [k,list] of Object.entries(grp(e=>e.date+'|'+e.pid))){ const [date,pid]=k.split('|'); await transferWip(date, pid, list.map(e=>({key:e.line.key, qty:e.qty}))); }
   for(const t of touched){ const [d,p]=t.split('|'); await recomputeSummary(d,p); }
-  await Store.update('planidx', d=>{ d=d||{dates:{}}; entries.forEach(e=>{ d.dates[e.date]=Array.from(new Set([...(d.dates[e.date]||[]), e.pid])); }); return d; });
-  S.planIdx=((await Store.get('planidx'))||{dates:{}}).dates;
   await audit('Book actuals ('+(src==='synchro'?'Synchro booking':'UID search')+')', entries.length+' line(s): '+entries.slice(0,20).map(e=>e.line.uid+'×'+e.qty+'@'+e.date).join(', '));
   if(routingOn()){ await reloadWip(); await writeSnapshot(E.todayISO()); } else { await loadReported(); derive(); }
   return entries.length;
