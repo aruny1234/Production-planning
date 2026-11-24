@@ -863,9 +863,10 @@ async function startApp(){
     <div class="brand"><b>${APP_NAME}</b><span>Day-wise · ${esc(S.cfg.settings.plantName)}</span></div>
     <div class="nav" id="nav"></div>
     <div class="who"><b>${esc(S.user.name)}</b>${esc(S.user.role)}${S.user.processes&&S.user.processes.length?' · '+S.user.processes.map(esc).join(', '):''}
-      <br><span>${Store.mode==='local'?'Trial mode (this browser)':Store.mode==='folder'?'Data folder: '+esc(Store.dir.name):'Shared database'}</span><br><button id="lref">Refresh data</button> <button id="lo">Sign out</button></div></nav>
+      <br><span>${Store.mode==='local'?'Trial mode (this browser)':Store.mode==='folder'?'Data folder: '+esc(Store.dir.name):'Shared database'}</span><br><button id="lref">Refresh data</button> <button id="lpw">Change password</button> <button id="lo">Sign out</button></div></nav>
     <main id="main"></main></div>`;
   $('#lref').onclick=async()=>{ S.loadedAt=0; go(S.view); };
+  $('#lpw').onclick=()=>changeMyPassword();
   $('#lo').onclick=async()=>{ sessionStorage.removeItem('wipUser'); sessionStorage.removeItem('ppDefaultPw'); S.user=null; if(Store.mode==='firebase') await Store.auth.signOut(); else showLogin(); };
   renderNav(); go(S.view);
 }
@@ -886,7 +887,7 @@ function setupBanners(){
   const out=[];
   if(Store.mode==='local') out.push('<div class="banner info">Trial mode: data is stored in this browser only. For shop-floor users on several PCs, set DATA_STORAGE to \'folder\' or add the Firebase configuration at the top of index.html.</div>');
   if(S.user.role==='Admin'){
-    if(Store.mode==='firebase' && sessionStorage.getItem('ppDefaultPw')) out.push('<div class="banner bad">You are using the default password '+DEFAULT_ADMIN_PW+'. Change it now: Masters › Users › your row › New PIN / password › Save users.</div>');
+    if(Store.mode==='firebase' && sessionStorage.getItem('ppDefaultPw')) out.push('<div class="banner bad">You are using the default password '+DEFAULT_ADMIN_PW+'. Change it now: click <b>Change password</b> at the bottom-left.</div>');
     if(Store.mode!=='firebase' && S.cfg.users.some(u=>u.demo)) out.push('<div class="banner warn">Trial accounts with PIN 1234 are still active. Change or delete them in Masters › Users before go-live.</div>');
     const noLT=sortedProcs().filter(p=>p.active && !S.cfg.leadTimes.some(l=>l.processId===p.id && l.status!=='Inactive' && !l.metallurgy && !l.part));
     if(noLT.length) out.push(`<div class="banner warn">No approved lead time for ${noLT.map(p=>esc(p.id+' '+p.name)).join(', ')}. Delay status shows “LT not set” for them until you enter a stage lead time in Masters › Lead times.</div>`);
@@ -897,6 +898,31 @@ function setupBanners(){
     if(inactiveNew.length) out.push(`<div class="banner warn">New process area(s) found in Synchro: ${inactiveNew.map(p=>esc(p.synchroName||p.id)).join(', ')}. Configure and activate them in Masters › Processes.</div>`);
   }
   return out.join('');
+}
+/* every user can change his own password (Firebase asks for the current one first, for security) */
+function changeMyPassword(){
+  const fb=Store.mode==='firebase'; const what=fb?'password':'PIN';
+  modal('Change my '+what, `<label class="field">Current ${what}<input type="password" id="cp0" autocomplete="current-password"></label>
+    <label class="field" style="margin-top:8px">New ${what} ${fb?'(at least 6 characters)':''}<input type="password" id="cp1" autocomplete="new-password"></label>
+    <label class="field" style="margin-top:8px">Repeat new ${what}<input type="password" id="cp2" autocomplete="new-password"></label>
+    <div id="cpmsg" class="small" style="color:var(--bad);margin-top:8px"></div>`,
+    [{label:'Change '+what, cls:'heat', fn:async d=>{
+      const cur=d.querySelector('#cp0').value, n1=d.querySelector('#cp1').value, n2=d.querySelector('#cp2').value, msg=t=>{ d.querySelector('#cpmsg').textContent=t; return false; };
+      if(!cur) return msg('Type your current '+what+'.');
+      if(fb && n1.length<6) return msg('The new password needs at least 6 characters.');
+      if(!fb && !n1) return msg('Type the new PIN.');
+      if(n1!==n2) return msg('The two new '+what+'s are not the same.');
+      try{
+        if(fb){ const u=Store.auth.currentUser;
+          await u.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(u.email, cur));
+          await u.updatePassword(n1); }
+        else{ const me=S.cfg.users.find(x=>x.username===S.user.username);
+          if(!me || me.pin!==pinHash(me.username,cur)) return msg('Current PIN is not correct.');
+          await saveConfig(c=>{ const x=c.users.find(y=>y.username===me.username); x.pin=pinHash(me.username,n1); delete x.demo; }, null); }
+        sessionStorage.removeItem('ppDefaultPw'); await audit('Password changed', S.user.username);
+        toast('Your '+what+' has been changed.'); setTimeout(()=>go(S.view),50);
+      }catch(e){ const c=e.code||''; return msg(/wrong-password|invalid-credential|invalid-login/.test(c)?'Current password is not correct.':/weak-password/.test(c)?'The new password is too weak – use at least 6 characters.':/too-many-requests/.test(c)?'Too many attempts – wait a few minutes and try again.':'Not changed: '+(c||e.message)); }
+    }}]);
 }
 function modal(title, body, actions){
   const d=document.createElement('dialog');
@@ -2083,7 +2109,7 @@ async function saveUsers(rows){
     const x={...u}; x.username=normUser(x.username);
     if(!x.uid){ try{ x.uid=await fbCreateAccount(x.username, x.__pin); }
       catch(e){ throw new Error('Could not create '+x.username+': '+(e.code==='auth/email-already-in-use'?'that user name already has an account (it may belong to a deleted user – choose another name).':e.message)); } }
-    else if(x.__pin && x.username===S.user.username){ try{ await Store.auth.currentUser.updatePassword(x.__pin); sessionStorage.removeItem('ppDefaultPw'); }catch(e){ throw new Error('Password not changed: '+(e.code==='auth/requires-recent-login'?'sign out, sign in again and retry.':e.message)); } }
+    else if(x.__pin && x.username===S.user.username){ throw new Error('To change your own password use the “Change password” button at the bottom-left (it asks for your current password first).'); }
     delete x.__pin; delete x.pinNew; delete x.pin; delete x.demo; out.push(x);
   }
   const uids={}; out.forEach(u=>{ uids[u.uid]=u.role; });
@@ -2104,7 +2130,7 @@ function validateMaster(tab, rows){
     if(!rows.some(r=>r.role==='Admin')) return 'Keep at least one Admin.';
     if(rows.some(r=>!/^[a-z0-9._-]{2,30}$/i.test(r.username))) return 'User names may use letters, digits, dot, dash and underscore only (no spaces).';
     if(Store.mode==='firebase'){ if(rows.some(r=>!r.uid && !(r.__pin && r.__pin.length>=6))) return 'Set a password of at least 6 characters for every new user.';
-      if(rows.some(r=>r.uid && r.__pin && r.username!==S.user.username)) return 'You can only change your own password here. For another user: delete the row and create the user again with a new user name, or reset it in the Firebase console.'; }
+      if(rows.some(r=>r.uid && r.__pin && r.username!==S.user.username)) return 'Passwords of other users cannot be changed here. Delete that user\'s row, save, then add the person again with a new user name and password.'; }
     else if(rows.some(r=>!r.pin && !r.__pin)) return 'Set a PIN for every new user.'; }
   return null;
 }
