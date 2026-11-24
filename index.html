@@ -209,7 +209,8 @@ const FIELD_MAP = { customer:'cust','customer p/o #':'po','job #':'job','part no
   'total black weight':'wt','agreed date':'agreed','job end date':'jobEnd','start date':'start',certification:'cert' };
 
 /* Parse the Synchro "Master WIP" sheet (array of arrays) */
-function parseSynchroRows(aoa){
+function parseSynchroRows(aoa, opts){
+  opts=opts||{};
   const warnings=[]; let hdrRow=-1;
   for(let r=0;r<Math.min(aoa.length,50);r++){ if(cleanHdr((aoa[r]||[])[0])==='customer'){ hdrRow=r; break; } }
   if(hdrRow<0) throw new Error("Header row not found: column A must contain 'Customer'. Is this the Synchro Master WIP export?");
@@ -221,6 +222,7 @@ function parseSynchroRows(aoa){
     if(/^process area/i.test(a)){ area=txt(row[1])|| a.split(':').slice(1).join(':').trim(); areas[area]=areas[area]||0; continue; }
     const uid=txt(row[col.uid]); const qty=num(row[col.qty]);
     if(!uid || qty===null) continue;               // subtotal, total and blank rows
+    if(!area && opts.defaultArea) area=opts.defaultArea;
     if(!area){ warnings.push('Row '+(r+1)+' has no Process Area above it – skipped'); continue; }
     const g=f=>col[f]===undefined?null:row[col[f]];
     const wt=num(g('wt'))||0;
@@ -239,6 +241,7 @@ function parseSynchroRows(aoa){
   }
   // unique keys per area + UID (duplicates get #2, #3)
   const occ={};
+  if(opts.defaultArea && !areas[opts.defaultArea] && rows.length) areas[opts.defaultArea]=rows.filter(x=>x.area===opts.defaultArea).length;
   rows.forEach(r=>{ const k=r.area+'|'+r.uid; occ[k]=(occ[k]||0)+1; r.occ=occ[k]; });
   rows.forEach(r=>{ if(occ[r.area+'|'+r.uid]>1) r.issues.push('Duplicate UID in export'); });
   return { rows, areas, warnings, hdrRow:hdrRow+1, columns:col };
@@ -860,7 +863,8 @@ const NAV=[
   {id:'ht', label:'HT planning', roles:['Admin','HT User','Management']},
   {id:'htdash', label:'HT dashboard', roles:['Admin','HT User','Management']},
   {sep:true},
-  {id:'upload', label:'Upload Synchro WIP', roles:['Admin']},
+  {id:'upload', label:'Upload WIP', roles:['Admin','Management','Department User','HT User']},
+  {id:'datacheck', label:'Data check (duplicates)', roles:['Admin','Management']},
   {id:'masters', label:'Masters', roles:['Admin']},
   {id:'history', label:'History & audit', roles:['Admin','Management']},
 ];
@@ -891,7 +895,7 @@ function go(v){
   S.view=v; S.charts.forEach(c=>c.destroy()); S.charts=[];
   renderNav(); renderNotifBell(); const m=$('#main'); m.innerHTML='';
   if(Store.mode!=='local' && Date.now()-(S.loadedAt||0)>120000){ m.innerHTML='<div class="empty">Refreshing data…</div>'; loadAll().then(()=>go(v)).catch(e=>toast('Refresh failed: '+e.message,true)); return; }   // other users' entries
-  const fn={dashboard:vDashboard,wip:vWip,plan:vPlan,exec:vExec,ht:vHT,htdash:vHTDash,upload:vUpload,masters:vMasters,history:vHistory}[v];
+  const fn={dashboard:vDashboard,wip:vWip,plan:vPlan,exec:vExec,ht:vHT,htdash:vHTDash,upload:vUpload,masters:vMasters,history:vHistory,datacheck:vDataCheck}[v];
   Promise.resolve(fn(m)).catch(e=>{ console.error(e); m.innerHTML+=`<div class="banner bad">This screen hit an error: ${esc(e.message)}</div>`; });
   window.scrollTo(0,0);
 }
@@ -911,6 +915,8 @@ function setupNotices(){
     if(routingOn() && !(S.cfg.routes||[]).some(r=>r.active!==false && !r.part && !r.metallurgy && !r.customer)) add('warn','No general route','Routing mode is on, but no route without Part / Metallurgy / Customer exists, so some castings cannot move on.',toMaster('Routing'),'Open Routing');
     const inactiveNew=S.cfg.processes.filter(p=>p.autoAdded && !p.active);
     if(inactiveNew.length) add('warn','New process area(s) from Synchro',inactiveNew.map(p=>p.synchroName||p.id).join(', ')+' – configure and activate them.',toMaster('Processes'),'Open Processes');
+    const dd=wipDuplicates(); const extra=dd.sameStage.reduce((t,l)=>t+l.length-1,0);
+    if(extra) add('warn',extra+' duplicate WIP line(s)','The same UID appears more than once in one process.',()=>go('datacheck'),'Open Data check');
     if(!S.wipMeta) add('info','No Synchro WIP loaded','Upload the Master WIP export to start planning.',()=>go('upload'),'Upload WIP');
   }
   return out;
@@ -1073,24 +1079,30 @@ async function reverseMoves(date, moves){
 }
 
 /* ===================== UPLOAD SYNCHRO WIP ===================== */
+const canFullUpload=()=>isRole('Admin','Management');
+const myUploadPids=()=>canFullUpload()? S.cfg.processes.map(p=>p.id) : (S.user.processes||[]);
+const areaFor=pid=>{ const p=procById(pid); return (p&&p.synchroName)||(pid+'-'+(p?p.name:'')); };
 function vUpload(m){
-  const r=routingOn();
-  m.innerHTML=head('Upload Synchro WIP', r?`Routing mode: only the entry stage (${entryStages().map(esc).join(', ')}) is taken from the file; later stages are filled automatically when departments submit actuals.`:'Load the daily “Master WIP” export (.xls or .xlsx). Separator, subtotal and total rows are recognised automatically.')+setupBanners()+
+  const full=canFullUpload(); const mine=myUploadPids().filter(id=>procById(id));
+  m.innerHTML=head(full?'Upload Synchro WIP':'Upload WIP – '+mine.map(id=>id+' '+procName(id)).join(', '),
+    full? (routingOn()?`Routing mode: only the entry stage (${entryStages().map(esc).join(', ')}) is taken from the Master WIP; later stages are filled automatically.`:'Load the Synchro “Master WIP” export to refresh all stages, or one department sheet to refresh only that stage.')
+        : 'Load the Synchro export (or your department sheet). Only the WIP of your process is replaced; other departments are not touched.')+
    `<div class="panel"><div class="row" style="justify-content:space-between;align-items:flex-end"><div class="row">
       <label class="field">Synchro export file<input type="file" id="uf" accept=".xls,.xlsx,.xlsm"></label>
-      <label class="field">WIP snapshot date<input type="date" id="ud" value="${E.todayISO()}"></label></div>
-      <div class="row"><span class="small muted">Current WIP: ${S.wipMeta?fmt(S.wip.length)+' lines · '+mt(S.wip.reduce((s,w)=>s+w.wt,0))+' MT':'none'}</span>${S.wipMeta||Object.keys(S.planIdx||{}).length||(S.ht.batches||[]).length||S.cfOpen.length?'<button class="btn danger" id="udel">Delete uploaded WIP and its plans</button>':''}</div></div>
+      <label class="field">WIP snapshot date<input type="date" id="ud" value="${E.todayISO()}"></label>
+      <span id="usheet"></span></div>
+      <div class="row"><span class="small muted">Current WIP${full?'':' of your process'}: ${fmt(S.wip.filter(w=>full||mine.includes(w.processId)).length)} lines</span>${isRole('Admin') && (S.wipMeta||Object.keys(S.planIdx||{}).length||(S.ht.batches||[]).length||S.cfOpen.length)?'<button class="btn danger" id="udel">Delete uploaded WIP and its plans</button>':''}</div></div>
       <div id="uprev" style="margin-top:14px"></div></div>
     <h2>Previous uploads</h2><div id="uhist"></div>`;
   if($('#udel')) $('#udel').onclick=async()=>{
-    const {open, done}=await openPlanDays();
+    const {open, done}=await openPlanDays(); const r=routingOn();
     modal('Delete uploaded WIP', `<p>This deletes the uploaded WIP and everything planned on it, for <b>all stages</b>:</p>
       <ul style="margin:0 0 10px 18px;padding:0"><li><b>${fmt(S.wip.length)}</b> WIP lines (${mt(S.wip.reduce((s,w)=>s+w.wt,0))} MT)</li>
       <li><b>${open.length}</b> published plan day(s) without actuals (all processes)</li><li><b>${(S.ht.batches||[]).length}</b> HT furnace load(s) – planned and running</li>
       <li><b>${S.cfOpen.length}</b> open carry-forward line(s)</li></ul>
-      <p class="small muted">${done.length} plan day(s) that already have submitted actuals are kept as history, so past plan adherence stays visible.</p>
-      <label class="small" style="display:block"><input type="checkbox" id="dfull"> <b>Full reset</b> – also delete those ${done.length} executed day(s), all actuals, dashboards, stage movements and upload history (masters and users are kept)</label>
-      ${r?'<label class="small" style="display:block;margin-top:6px"><input type="checkbox" id="dforget" checked> Forget which UIDs were imported (so the next upload can add them again)</label>':''}
+      <p class="small muted">${done.length} plan day(s) that already have submitted actuals are kept as history.</p>
+      <label class="small" style="display:block"><input type="checkbox" id="dfull"> <b>Full reset</b> – also delete executed days, all actuals, dashboards, stage movements and upload history (masters and users are kept)</label>
+      ${r?'<label class="small" style="display:block;margin-top:6px"><input type="checkbox" id="dforget" checked> Forget which UIDs were imported</label>':''}
       <label class="field" style="margin-top:12px">Type DELETE to confirm<input id="dconf" autocomplete="off"></label>`,
       [{label:'Delete',cls:'danger',fn:async d=>{ if(d.querySelector('#dconf').value.trim()!=='DELETE'){ d.querySelector('#dconf').classList.add('invalid'); return false; }
         const log=await deleteWip({full:d.querySelector('#dfull').checked, forget:!!(d.querySelector('#dforget')&&d.querySelector('#dforget').checked)});
@@ -1098,19 +1110,32 @@ function vUpload(m){
   };
   $('#uf').onchange=async e=>{
     const f=e.target.files[0]; if(!f) return;
-    if(typeof XLSX==='undefined') return toast('The Excel reader (SheetJS) did not load. Check the internet connection or the lib folder.',true);
+    if(typeof XLSX==='undefined') return toast('The Excel reader did not load. Check the internet connection or the lib folder.',true);
     try{
-      const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});
-      const sn=wb.SheetNames.find(n=>/master\s*wip/i.test(n))||wb.SheetNames[0];
-      const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,raw:true,defval:null});
-      const parsed=E.parseSynchroRows(aoa); parsed.sheet=sn; parsed.file=f.name;
-      await showUploadPreview(parsed);
+      const wb=XLSX.read(await f.arrayBuffer(),{type:'array'}); S.ui.upWb=wb; S.ui.upFile=f.name;
+      // best sheet: Master WIP for admin/management, the department sheet for department users
+      const key=t=>String(t||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      let def=wb.SheetNames.find(n=>/master\s*wip/i.test(n))||wb.SheetNames[0];
+      if(!full){ const nm=mine.map(id=>key(procName(id)).replace(/inhouse|subcontract/g,''));
+        const hit=wb.SheetNames.find(n=>nm.some(x=>x.includes(key(n))||key(n).includes(x))); if(hit) def=hit; }
+      $('#usheet').innerHTML=`<label class="field">Sheet<select id="ush">${wb.SheetNames.map(n=>`<option ${n===def?'selected':''}>${esc(n)}</option>`).join('')}</select></label>
+        <label class="field" id="uprocw">Process of this sheet<select id="uproc">${mine.map(id=>`<option value="${id}">${esc(id+' '+procName(id))}</option>`).join('')}</select></label>`;
+      const run=()=>parseUploadSheet(); $('#ush').onchange=run; $('#uproc').onchange=run; run();
     }catch(err){ $('#uprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; }
   };
   Store.get('uploads/'+E.todayISO().slice(0,4)).then(d=>{
-    const l=((d||{}).list||[]).slice().reverse();
-    $('#uhist').innerHTML=l.length?`<div class="tbl-wrap"><table><thead><tr><th>Uploaded</th><th>Snapshot</th><th>File</th><th>Mode</th><th class="r">Lines added / loaded</th><th class="r">MT</th><th>By</th></tr></thead><tbody>${l.map(u=>`<tr><td>${fdt(u.ts)}</td><td>${fdate(u.snapshotDate)}</td><td>${esc(u.file)}</td><td>${esc(u.mode||'Snapshot')}</td><td class="r num">${fmt(u.rows)}</td><td class="r num">${mt(u.kg)}</td><td>${esc(u.by)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No uploads yet this year.</div>';
+    const l=((d||{}).list||[]).slice().reverse().filter(u=>full||!u.pids||u.pids.some(p=>mine.includes(p)));
+    $('#uhist').innerHTML=l.length?`<div class="tbl-wrap"><table><thead><tr><th>Uploaded</th><th>Snapshot</th><th>File</th><th>Mode / process</th><th class="r">Lines</th><th class="r">MT</th><th>By</th></tr></thead><tbody>${l.map(u=>`<tr><td>${fdt(u.ts)}</td><td>${fdate(u.snapshotDate)}</td><td>${esc(u.file)}</td><td>${esc(u.mode||'Snapshot')}${u.pids?' · '+esc(u.pids.join(', ')):''}${u.stat?`<div class="small muted">fresh ${u.stat.fresh} · kept ${u.stat.kept} · removed ${u.stat.removed} · duplicates excluded ${u.stat.dupInFile}${u.stat.skippedInWip?' · already in WIP '+u.stat.skippedInWip:''}</div>`:''}</td><td class="r num">${fmt(u.rows)}</td><td class="r num">${mt(u.kg)}</td><td>${esc(u.by)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No uploads yet this year.</div>';
   });
+}
+function parseUploadSheet(){
+  const wb=S.ui.upWb, sn=$('#ush').value; const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,raw:true,defval:null});
+  const hasAreas=aoa.some(r=>r && /^process area/i.test(String(r[0]||'').trim()));
+  $('#uprocw').style.display=hasAreas?'none':'';
+  try{
+    const p=E.parseSynchroRows(aoa, hasAreas?{}:{defaultArea:areaFor($('#uproc').value)}); p.sheet=sn; p.file=S.ui.upFile; p.hasAreas=hasAreas;
+    showUploadPreview(p);
+  }catch(err){ $('#uprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; }
 }
 function toWipRow(r, seenMap, snapDate){
   const pid=E.areaCode(r.area); const key=E.keyOf(pid,r.uid,r.occ);
@@ -1118,7 +1143,54 @@ function toWipRow(r, seenMap, snapDate){
     poured:r.poured, pouredRaw:r.pouredRaw, age:r.age, qty:r.qty, wt:r.wt, unitWt:r.unitWt, agreed:r.agreed, jobEnd:r.jobEnd, start:r.start,
     startRaw:r.startRaw, cert:r.cert, issues:r.issues, firstSeen:(seenMap&&seenMap[key])||snapDate};
 }
+const normUID=u=>String(u||'').trim().toUpperCase();
+/* duplicate analysis of an upload against itself and against the WIP already in the app */
+function analyseUpload(fileRows, pids){
+  const seenF={}, rowsU=[], dupFile=[];
+  fileRows.forEach(x=>{ const k=E.areaCode(x.area)+'|'+normUID(x.uid); if(seenF[k]){ dupFile.push(x); return; } seenF[k]=1; rowsU.push(x); });
+  const existing={}; S.wip.filter(w=>pids.includes(w.processId)).forEach(w=>{ existing[w.processId+'|'+normUID(w.uid)]=w; });
+  const fresh=[], same=[];
+  rowsU.forEach(x=>{ (existing[E.areaCode(x.area)+'|'+normUID(x.uid)]?same:fresh).push(x); });
+  const inFile=new Set(rowsU.map(x=>E.areaCode(x.area)+'|'+normUID(x.uid)));
+  const gone=Object.entries(existing).filter(([k])=>!inFile.has(k)).map(([k,w])=>w);
+  const stageOf={}; S.wip.forEach(w=>{ (stageOf[normUID(w.uid)]=stageOf[normUID(w.uid)]||new Set()).add(w.processId); });
+  const otherStage=rowsU.filter(x=>{ const st=stageOf[normUID(x.uid)]; return st && [...st].some(pid=>pid!==E.areaCode(x.area)); });
+  return {rowsU, dupFile, fresh, same, gone, otherStage, stageOf};
+}
 async function showUploadPreview(p){
+  const full=canFullUpload(); const mine=myUploadPids();
+  if(!(full && p.hasAreas && routingOn())){
+    const rows=p.rows.filter(x=>mine.includes(E.areaCode(x.area)));
+    const other=p.rows.length-rows.length;
+    let pids=[...new Set(rows.map(x=>E.areaCode(x.area)))];
+    if(full && p.hasAreas) pids=[...new Set([...pids, ...((S.wipMeta&&S.wipMeta.pids)||[])])];   // full Master WIP: stages missing in the file are emptied
+    const A=analyseUpload(rows, pids);
+    const tile=(n,l,c,id)=>`<button class="kpi" data-ul="${id}" style="text-align:left;cursor:pointer;border:1px solid var(--line)"><div class="v num ${c||''}">${fmt(n)}</div><div class="l">${l}</div></button>`;
+    const list=(arr,extra)=>arr.length?`<div class="tbl-wrap" style="max-height:260px"><table><thead><tr><th>Process</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th class="r">Qty</th>${extra?'<th>Note</th>':''}</tr></thead><tbody>${arr.slice(0,500).map(x=>{ const pid=x.processId||E.areaCode(x.area);
+        return `<tr><td>${esc(pid)}</td><td><b>${esc(x.uid)}</b></td><td>${esc(x.job)}</td><td>${esc(x.die)}</td><td>${esc(x.desc)}</td><td class="r num">${fmt(x.qty)}</td>${extra?`<td class="small">${esc(extra(x))}</td>`:''}</tr>`; }).join('')}</tbody></table></div>`:'<div class="empty" style="padding:12px">None.</div>';
+    const mode0=S.ui.upMode||(routingOn()?'add':'update');
+    $('#uprev').innerHTML=`<div class="banner info">Sheet “${esc(p.sheet)}”: ${fmt(rows.length)} WIP lines for ${[...new Set(rows.map(x=>E.areaCode(x.area)))].map(id=>esc(id+' '+procName(id))).join(', ')||'–'}.${other?` ${fmt(other)} lines of other processes are ignored.`:''}</div>
+      <h3 style="margin-top:6px">Duplicate check before upload</h3>
+      <div class="kpis" style="margin-bottom:10px">
+        ${tile(A.fresh.length,'Fresh UIDs – will be added','ok','fresh')}
+        ${tile(A.same.length,'Already in WIP of this process','', 'same')}
+        ${tile(A.dupFile.length,'Duplicate UID inside the file – excluded',A.dupFile.length?'bad':'','dupFile')}
+        ${tile(A.otherStage.length,'UID also in another stage (info)',A.otherStage.length?'warn':'','other')}
+        ${tile(A.gone.length,'In app but not in file','', 'gone')}</div>
+      <div id="ulist"></div>
+      <div class="panel" style="margin-top:10px;background:var(--soft)"><b>Upload mode</b>
+        <label style="display:block;margin-top:6px"><input type="radio" name="umode" value="add" ${mode0==='add'?'checked':''}> <b>Add fresh UIDs only</b> – adds the ${fmt(A.fresh.length)} fresh lines; lines already in WIP and duplicates are skipped; nothing is removed.</label>
+        <label style="display:block;margin-top:4px"><input type="radio" name="umode" value="update" ${mode0==='update'?'checked':''}> <b>Update the stage from this file</b> (daily refresh) – adds ${fmt(A.fresh.length)} fresh, keeps ${fmt(A.same.length)}, removes ${fmt(A.gone.length)} that are no longer in the file; duplicates inside the file are excluded.</label></div>
+      <div class="row" style="margin-top:14px"><button class="btn heat" id="ugo" ${rows.length||A.gone.length?'':'disabled'}>Upload</button><span class="small muted">The same UID can never appear twice in one process. Plans, actuals and history are not changed.</span></div>`;
+    const lists={fresh:list(A.fresh), same:list(A.same), dupFile:list(A.dupFile,()=> 'second line with the same UID in this process – excluded'), other:list(A.otherStage,x=>'also in '+[...A.stageOf[normUID(x.uid)]].filter(pid=>pid!==E.areaCode(x.area)).map(pid=>pid+' '+procName(pid)).join(', ')), gone:list(A.gone,()=> 'removed only in “Update” mode')};
+    const names={fresh:'Fresh UIDs',same:'Already in WIP',dupFile:'Duplicates inside the file (excluded)',other:'UID also in another stage',gone:'In app but not in file'};
+    $('#uprev').querySelectorAll('[data-ul]').forEach(b=>b.onclick=()=>{ $('#ulist').innerHTML=`<h3>${names[b.dataset.ul]}</h3>`+lists[b.dataset.ul]; });
+    $('#uprev').querySelectorAll('[name=umode]').forEach(r=>r.onchange=()=>{ S.ui.upMode=r.value; });
+    if(A.dupFile.length) $('#ulist').innerHTML=`<h3>${names.dupFile}</h3>`+lists.dupFile;
+    $('#ugo').onclick=()=>commitStageUpload(p, A, pids, $('#ud').value||E.todayISO(), $('#uprev').querySelector('[name=umode]:checked').value, full && p.hasAreas);
+    return;
+  }
+  p.rows=analyseUpload(p.rows, []).rowsU;        // routing mode: remove duplicates inside the file first
   const known=new Set(S.cfg.processes.map(x=>x.id)); const r=routingOn(); const ent=entryStages();
   const seen=r? (((await Store.get('seen'))||{m:{}}).m) : {};
   const inApp=new Set(S.wip.map(w=>uidPart(w.key)));
@@ -1137,6 +1209,38 @@ async function showUploadPreview(p){
     <div class="row" style="margin-top:14px"><button class="btn heat" id="ugo">${r?'Add new lines to WIP':'Replace current WIP with this file'}</button><span class="small muted">Plans, actuals and carry-forwards already saved are kept.</span></div>`;
   if($('#uinit')) $('#uinit').onchange=e=>{ $('#ugo').textContent=e.target.checked?'Initial load: replace app WIP with all stages':'Add new lines to WIP'; };
   $('#ugo').onclick=()=>commitUpload(p, $('#ud').value||E.todayISO(), {initial:!!($('#uinit')&&$('#uinit').checked), newRows});
+}
+async function commitStageUpload(p, A, pids, snapDate, mode, fullFile){
+  const btn=$('#ugo'); btn.disabled=true; btn.textContent='Saving…';
+  try{
+    if(fullFile){ // new process areas from the Master WIP go into the master as inactive
+      const newAreas=Object.keys(p.areas).filter(a=>!S.cfg.processes.some(x=>x.id===E.areaCode(a)));
+      if(newAreas.length) await saveConfig(c=>{ newAreas.forEach(a=>c.processes.push({id:E.areaCode(a), name:a.replace(/^\s*\d+\s*-\s*/,''), synchroName:a, type:'Normal', capacityMT:c.settings.defaultCapMT||5, workDays:[1,2,3,4,5,6], active:false, autoAdded:true, seq:90, partial:true})); }, 'New process areas from Synchro: '+newAreas.join(', '));
+    }
+    const src=mode==='add'?A.fresh:A.rowsU;
+    const seen=await Store.update('seen', d=>{ d=d||{m:{}}; src.forEach(x=>{ const k=E.keyOf(E.areaCode(x.area),x.uid,1); if(!d.m[k]) d.m[k]=snapDate; d.m['U:'+uidPart(k)]=snapDate; }); return d; });
+    const rows=src.map(x=>toWipRow({...x, occ:1}, seen.m, snapDate));
+    let added=0, skippedRace=0;
+    for(const pid of pids){
+      const mineRows=rows.filter(r=>r.processId===pid);
+      if(mode==='add'){ if(!mineRows.length) continue;
+        await Store.update('wipp/'+pid, d=>{ d=d||{rows:[]}; const have=new Set(d.rows.map(r=>normUID(r.uid))); added=0; skippedRace=0;
+          mineRows.forEach(r=>{ if(have.has(normUID(r.uid))){ skippedRace++; return; } have.add(normUID(r.uid)); d.rows.push(r); added++; }); return d; }); }
+      else await Store.set('wipp/'+pid,{rows:mineRows});
+    }
+    await Store.update('wip/meta', m=>{ m=m||{layout:'byProcess',pids:[]}; m.layout='byProcess'; m.pids=Array.from(new Set([...(m.pids||[]),...pids]));
+      m.procSnap=m.procSnap||{}; pids.forEach(pid=>m.procSnap[pid]={date:snapDate, file:p.file, by:S.user.username, at:new Date().toISOString(), mode});
+      if(!m.snapshotDate || snapDate>=m.snapshotDate){ m.snapshotDate=snapDate; m.file=p.file; } m.uploadedAt=new Date().toISOString(); return m; });
+    if(mode==='update'){ const keep=new Set(rows.map(r=>r.processId+'|'+normUID(r.uid)));
+      await updateCF(list=>{ list.filter(c=>pids.includes(c.processId) && !keep.has(c.processId+'|'+normUID(c.uid))).forEach(c=>{ c.status='Closed'; c.closeNote='Left stage in Synchro ('+snapDate+')'; c.closedAt=new Date().toISOString(); }); }); }
+    const stat={fresh:A.fresh.length, kept:mode==='update'?A.same.length:0, skippedInWip:mode==='add'?A.same.length:0, removed:mode==='update'?A.gone.length:0, dupInFile:A.dupFile.length,
+      dupUIDs:A.dupFile.slice(0,200).map(x=>E.areaCode(x.area)+' '+x.uid)};
+    const label=(fullFile?'Master WIP':'Department')+' – '+(mode==='add'?'add fresh only':'update stage');
+    await Store.update('uploads/'+snapDate.slice(0,4), d=>{ d=d||{list:[]}; d.list.push({ts:new Date().toISOString(), snapshotDate:snapDate, file:p.file, rows:rows.length, kg:rows.reduce((s,x)=>s+x.wt,0), by:S.user.username, mode:label, pids, stat}); return d; });
+    await audit('Upload WIP', label+' '+pids.join(',')+': '+p.file+' – fresh '+stat.fresh+', kept '+stat.kept+', removed '+stat.removed+', duplicates in file excluded '+stat.dupInFile+(mode==='add'?', already in WIP skipped '+stat.skippedInWip:''));
+    await loadAll(); await writeSnapshot(snapDate);
+    toast((mode==='add'?'Added '+stat.fresh+' fresh line(s)':'Stage updated: '+stat.fresh+' added, '+stat.removed+' removed')+(stat.dupInFile?' · '+stat.dupInFile+' duplicate(s) excluded':'')+'.'); go('wip');
+  }catch(e){ console.error(e); toast('Upload failed: '+e.message,true); btn.disabled=false; btn.textContent='Upload'; }
 }
 async function commitUpload(p, snapDate, opt){
   opt=opt||{}; const btn=$('#ugo'); btn.disabled=true; const label=btn.textContent; btn.textContent='Saving…';
@@ -2046,6 +2150,43 @@ function vWip(m){
     [{label:'Print',cls:'heat',fn:async d=>{ await printWip(list, d.querySelector('input[name=pg]:checked').value); }}]);
   $('#wx').onclick=()=>csv('WIP_status_'+E.todayISO()+'.csv',[['Process','UID','Job','Tooling no.','Part','Description','Metallurgy','Customer','Customer PO','Qty','Total Black Wt kg','Unit Wt kg','Start Date','Agreed Date','Job End Date','Lead time days','Target','Delay status','Delay days','State','Ageing days','Data note'],
     ...list.map(w=>[w.processId,w.uid,w.job,w.die,w.part,w.desc,w.met,w.cust,w.po,w.qty,w.wt,w.unitWt,w.start,w.agreed,w.jobEnd,w.lt?w.lt.days:'',w.delay.target,w.delay.status,w.delay.delayDays,wipState(w),w.age,(w.issues||[]).join('; ')])]);
+}
+
+/* ===================== DATA CHECK – duplicate UIDs in the WIP ===================== */
+function wipDuplicates(){
+  const byKey={}, byUID={};
+  S.wip.forEach(w=>{ const u=normUID(w.uid); (byKey[w.processId+'|'+u]=byKey[w.processId+'|'+u]||[]).push(w); (byUID[u]=byUID[u]||new Set()).add(w.processId); });
+  const sameStage=Object.values(byKey).filter(l=>l.length>1);
+  const multiStage=Object.entries(byUID).filter(([u,s])=>s.size>1).map(([u,s])=>({uid:u, pids:[...s], lines:S.wip.filter(w=>normUID(w.uid)===u)}));
+  return {sameStage, multiStage};
+}
+async function vDataCheck(m){
+  const D=wipDuplicates(); const admin=isRole('Admin');
+  const y=E.todayISO().slice(0,4); const up=(((await Store.get('uploads/'+y))||{}).list||[]).filter(u=>u.stat && (u.stat.dupInFile||u.stat.skippedInWip)).slice().reverse();
+  const extra=D.sameStage.reduce((s,l)=>s+l.length-1,0);
+  m.innerHTML=head('Data check – duplicate UIDs','A UID may appear only once per process. Uploads exclude duplicates automatically; this page shows what is in the WIP now and what uploads excluded.')
+   +`<div class="kpis"><div class="kpi ${extra?'bad':'ok'}"><div class="v num">${fmt(extra)}</div><div class="l">Extra lines – same UID twice in one process</div></div>
+      <div class="kpi ${D.multiStage.length?'warn':'ok'}"><div class="v num">${fmt(D.multiStage.length)}</div><div class="l">UIDs in more than one process</div></div>
+      <div class="kpi"><div class="v num">${fmt(up.reduce((s,u)=>s+u.stat.dupInFile,0))}</div><div class="l">Duplicates excluded by uploads this year</div></div>
+      <div class="kpi"><div class="v num">${fmt(S.wip.length)}</div><div class="l">WIP lines checked</div></div></div>
+    <h2>Same UID twice in one process</h2>
+    ${D.sameStage.length?`${admin?'<div class="row" style="margin-bottom:8px"><button class="btn danger" id="dcfix">Remove the extra lines (keep the first of each UID)</button></div>':''}
+      <div class="tbl-wrap" style="max-height:340px"><table><thead><tr><th>Process</th><th>UID</th><th class="r">Lines</th><th>Job</th><th>Tooling no.</th><th>Description</th><th class="r">Total qty</th></tr></thead><tbody>
+      ${D.sameStage.map(l=>`<tr><td>${esc(l[0].processId+' '+procName(l[0].processId))}</td><td><b>${esc(l[0].uid)}</b></td><td class="r num">${l.length}</td><td>${esc(l[0].job)}</td><td>${esc(l[0].die)}</td><td>${esc(l[0].desc)}</td><td class="r num">${fmt(l.reduce((s,w)=>s+w.qty,0))}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">None – every UID appears only once per process. ✔</div>'}
+    <h2>UID in more than one process</h2>
+    <p class="small muted" style="margin-top:-4px">Usually a casting that moved on in Synchro while an older upload of the previous stage still lists it. Re-upload the older stage (Update mode) to clear it.</p>
+    ${D.multiStage.length?`<div class="tbl-wrap" style="max-height:340px"><table><thead><tr><th>UID</th><th>Processes</th><th>Job</th><th>Description</th><th>Last upload of those stages</th></tr></thead><tbody>
+      ${D.multiStage.map(x=>`<tr><td><b>${esc(x.lines[0].uid)}</b></td><td>${x.pids.map(pid=>`<span class="chip mute">${esc(pid+' '+procName(pid))}</span>`).join(' ')}</td><td>${esc(x.lines[0].job)}</td><td>${esc(x.lines[0].desc)}</td>
+        <td class="small">${x.pids.map(pid=>{ const ps=S.wipMeta&&S.wipMeta.procSnap&&S.wipMeta.procSnap[pid]; return esc(pid+': '+(ps?fdate(ps.date):fdate(S.wipMeta&&S.wipMeta.snapshotDate))); }).join(' · ')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">None. ✔</div>'}
+    <h2>Duplicates excluded by uploads</h2>
+    ${up.length?`<div class="tbl-wrap" style="max-height:300px"><table><thead><tr><th>Uploaded</th><th>By</th><th>Mode / process</th><th class="r">Duplicates in file</th><th class="r">Already in WIP (skipped)</th><th>Excluded UIDs</th></tr></thead><tbody>
+      ${up.map(u=>`<tr><td>${fdt(u.ts)}</td><td>${esc(u.by)}</td><td>${esc(u.mode)}${u.pids?' · '+esc(u.pids.join(', ')):''}</td><td class="r num">${u.stat.dupInFile}</td><td class="r num">${u.stat.skippedInWip||0}</td><td class="small" style="white-space:normal">${esc((u.stat.dupUIDs||[]).join(', '))}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No duplicates excluded this year.</div>'}`;
+  if($('#dcfix')) $('#dcfix').onclick=()=>modal('Remove duplicate lines',`<p>${extra} extra line(s) will be removed. For each UID the first line stays in WIP. Plans and history are not changed.</p>`,
+    [{label:'Remove extra lines',cls:'danger',fn:async()=>{
+      const pids=[...new Set(D.sameStage.map(l=>l[0].processId))]; let removed=0;
+      for(const pid of pids) await Store.update('wipp/'+pid, d=>{ d=d||{rows:[]}; const seen=new Set(); const before=d.rows.length;
+        d.rows=d.rows.filter(r=>{ const u=normUID(r.uid); if(seen.has(u)) return false; seen.add(u); return true; }); removed+=before-d.rows.length; return d; });
+      await audit('Remove duplicate WIP lines', removed+' line(s) in '+pids.join(', ')); await reloadWip(); toast(removed+' duplicate line(s) removed.'); go('datacheck'); }}]);
 }
 
 /* ===================== MASTERS ===================== */
