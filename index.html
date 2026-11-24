@@ -191,7 +191,7 @@ function weekdayISO(iso){ return new Date(dnum(iso)*DAY).getUTCDay(); } // 0=Sun
 function weekStart(iso){ const w=(weekdayISO(iso)+6)%7; return addDays(iso,-w); } // Monday
 function parseDateAny(v){
   if(v===null||v===undefined||v==='') return null;
-  if(typeof v==='number'){ if(v<20000||v>80000) return null; return isoFromUTC(Date.UTC(1899,11,30)+Math.round(v)*DAY); }
+  if(typeof v==='number'){ if(v<20000||v>80000) return null; return isoFromUTC(Date.UTC(1899,11,30)+Math.floor(v+1e-9)*DAY); }   // date part only (booking times like 46349.41)
   if(v instanceof Date && !isNaN(v)) return v.getFullYear()+'-'+pad(v.getMonth()+1)+'-'+pad(v.getDate());
   const s=String(v).trim();
   let m=s.match(/^(\d{1,2})[-\/ ]([A-Za-z]{3})[A-Za-z]*[-\/ ](\d{2,4})$/);
@@ -640,7 +640,7 @@ async function loadReported(){
   const dates=[]; for(let d=from; d<=to && dates.length<8; d=E.addDays(d,1)) dates.push(d);
   const paths=[]; dates.forEach(d=>S.cfg.processes.forEach(p=>paths.push('exec/'+d+'/'+p.id)));
   const docs=await Store.getMany(paths);
-  docs.forEach(doc=>{ if(!doc) return; (doc.lines||[]).forEach(l=>{ if(doc.status==='Submitted'||l.batchId) S.reported[l.key]=(S.reported[l.key]||0)+(+l.actualQty||0); }); });
+  docs.forEach(doc=>{ if(!doc) return; (doc.lines||[]).forEach(l=>{ if(doc.status==='Submitted'||l.batchId||(l.source&&l.source!=='day')) S.reported[l.key]=(S.reported[l.key]||0)+(+l.actualQty||0); }); });
 }
 function derive(){
   const today=E.todayISO(), amber=+S.cfg.settings.amberDays||0;
@@ -863,7 +863,8 @@ const NAV=[
   {id:'ht', label:'HT planning', roles:['Admin','HT User','Management']},
   {id:'htdash', label:'HT dashboard', roles:['Admin','HT User','Management']},
   {sep:true},
-  {id:'upload', label:'Upload WIP', roles:['Admin','Management','Department User','HT User']},
+  {id:'upload', label:'Upload Synchro WIP', roles:['Admin','Management','Department User','HT User']},
+  {id:'booking', label:'Upload Synchro booking', roles:['Admin','Management','Department User','HT User']},
   {id:'datacheck', label:'Data check (duplicates)', roles:['Admin','Management']},
   {id:'masters', label:'Masters', roles:['Admin']},
   {id:'history', label:'History & audit', roles:['Admin','Management']},
@@ -895,7 +896,7 @@ function go(v){
   S.view=v; S.charts.forEach(c=>c.destroy()); S.charts=[];
   renderNav(); renderNotifBell(); const m=$('#main'); m.innerHTML='';
   if(Store.mode!=='local' && Date.now()-(S.loadedAt||0)>120000){ m.innerHTML='<div class="empty">Refreshing data…</div>'; loadAll().then(()=>go(v)).catch(e=>toast('Refresh failed: '+e.message,true)); return; }   // other users' entries
-  const fn={dashboard:vDashboard,wip:vWip,plan:vPlan,exec:vExec,ht:vHT,htdash:vHTDash,upload:vUpload,masters:vMasters,history:vHistory,datacheck:vDataCheck}[v];
+  const fn={dashboard:vDashboard,wip:vWip,plan:vPlan,exec:vExec,ht:vHT,htdash:vHTDash,upload:m=>{ S.ui.upTab='wip'; return vUpload(m); },booking:m=>{ S.ui.upTab='book'; return vUpload(m); },masters:vMasters,history:vHistory,datacheck:vDataCheck}[v];
   Promise.resolve(fn(m)).catch(e=>{ console.error(e); m.innerHTML+=`<div class="banner bad">This screen hit an error: ${esc(e.message)}</div>`; });
   window.scrollTo(0,0);
 }
@@ -917,7 +918,7 @@ function setupNotices(){
     if(inactiveNew.length) add('warn','New process area(s) from Synchro',inactiveNew.map(p=>p.synchroName||p.id).join(', ')+' – configure and activate them.',toMaster('Processes'),'Open Processes');
     const dd=wipDuplicates(); const extra=dd.sameStage.reduce((t,l)=>t+l.length-1,0);
     if(extra) add('warn',extra+' duplicate WIP line(s)','The same UID appears more than once in one process.',()=>go('datacheck'),'Open Data check');
-    if(!S.wipMeta) add('info','No Synchro WIP loaded','Upload the Master WIP export to start planning.',()=>go('upload'),'Upload WIP');
+    if(!S.wipMeta) add('info','No Synchro WIP loaded','Upload the Master WIP export to start planning.',()=>go('upload'),'Upload Synchro WIP');
   }
   return out;
 }
@@ -1082,11 +1083,14 @@ async function reverseMoves(date, moves){
 const canFullUpload=()=>isRole('Admin','Management');
 const myUploadPids=()=>canFullUpload()? S.cfg.processes.map(p=>p.id) : (S.user.processes||[]);
 const areaFor=pid=>{ const p=procById(pid); return (p&&p.synchroName)||(pid+'-'+(p?p.name:'')); };
+const upTabs=t=>`<div class="tabs"><button data-ut="wip" aria-selected="${t==='wip'}">Upload Synchro WIP</button><button data-ut="book" aria-selected="${t==='book'}">Upload Synchro booking</button></div>`;
+function bindUpTabs(m){ m.querySelectorAll('[data-ut]').forEach(b=>b.onclick=()=>go(b.dataset.ut==='book'?'booking':'upload')); }
 function vUpload(m){
+  if(S.ui.upTab==='book') return vBookUpload(m);
   const full=canFullUpload(); const mine=myUploadPids().filter(id=>procById(id));
-  m.innerHTML=head(full?'Upload Synchro WIP':'Upload WIP – '+mine.map(id=>id+' '+procName(id)).join(', '),
+  m.innerHTML=head(full?'Upload Synchro WIP':'Upload Synchro WIP – '+mine.map(id=>id+' '+procName(id)).join(', '),
     full? (routingOn()?`Routing mode: only the entry stage (${entryStages().map(esc).join(', ')}) is taken from the Master WIP; later stages are filled automatically.`:'Load the Synchro “Master WIP” export to refresh all stages, or one department sheet to refresh only that stage.')
-        : 'Load the Synchro export (or your department sheet). Only the WIP of your process is replaced; other departments are not touched.')+
+        : 'Load the Synchro export (or your department sheet). Only the WIP of your process is replaced; other departments are not touched.')+upTabs('wip')+
    `<div class="panel"><div class="row" style="justify-content:space-between;align-items:flex-end"><div class="row">
       <label class="field">Synchro export file<input type="file" id="uf" accept=".xls,.xlsx,.xlsm"></label>
       <label class="field">WIP snapshot date<input type="date" id="ud" value="${E.todayISO()}"></label>
@@ -1094,6 +1098,7 @@ function vUpload(m){
       <div class="row"><span class="small muted">Current WIP${full?'':' of your process'}: ${fmt(S.wip.filter(w=>full||mine.includes(w.processId)).length)} lines</span>${isRole('Admin') && (S.wipMeta||Object.keys(S.planIdx||{}).length||(S.ht.batches||[]).length||S.cfOpen.length)?'<button class="btn danger" id="udel">Delete uploaded WIP and its plans</button>':''}</div></div>
       <div id="uprev" style="margin-top:14px"></div></div>
     <h2>Previous uploads</h2><div id="uhist"></div>`;
+  bindUpTabs(m);
   if($('#udel')) $('#udel').onclick=async()=>{
     const {open, done}=await openPlanDays(); const r=routingOn();
     modal('Delete uploaded WIP', `<p>This deletes the uploaded WIP and everything planned on it, for <b>all stages</b>:</p>
@@ -1289,6 +1294,118 @@ async function updateCF(fn){
 }
 
 
+/* ===================== SYNCHRO BOOKING → ACTUALS ===================== */
+/* Upload the Synchro booking / movement sheet: each UID is matched to its open planned line (any plan day)
+   and booked as actual on the booking date. Unplanned castings that are in WIP can be booked as tonnage. */
+function vBookUpload(m){
+  const mine=myUploadPids().filter(id=>procById(id) && procById(id).active);
+  m.innerHTML=head('Upload Synchro booking','Upload the Synchro “Process Wise Booking Status” report. Each UID is matched with its planned line – also from other plan days – and booked as actual qty.')+upTabs('book')+
+   `<div class="panel"><div class="row" style="align-items:flex-end">
+      <label class="field">Synchro booking file<input type="file" id="bf" accept=".xls,.xlsx,.xlsm,.csv"></label>
+      <label class="field">Booking date (if the sheet has no date column)<input type="date" id="bd" value="${E.todayISO()}"></label>
+      <label class="field">Process (if the sheet has no process column)<select id="bp">${mine.map(id=>`<option value="${id}">${esc(id+' '+procName(id))}</option>`).join('')}</select></label>
+      <span id="bsheet"></span></div>
+      <p class="small muted" style="margin-bottom:0">Needed: a column with <b>UID</b>. Optional: booked / completed <b>qty</b> (else the open qty is booked), a <b>date</b> column, and a <b>process / operation</b> column (code such as 1060 or the process name).</p>
+      <div id="bprev" style="margin-top:14px"></div></div>`;
+  bindUpTabs(m);
+  $('#bf').onchange=async e=>{ const f=e.target.files[0]; if(!f) return;
+    try{ const wb=XLSX.read(await f.arrayBuffer(),{type:'array'}); S.ui.bkWb=wb; S.ui.bkFile=f.name;
+      $('#bsheet').innerHTML=`<label class="field">Sheet<select id="bsh">${wb.SheetNames.map(n=>`<option>${esc(n)}</option>`).join('')}</select></label>`;
+      const run=()=>parseBooking(); $('#bsh').onchange=run; $('#bd').onchange=run; $('#bp').onchange=run; run();
+    }catch(err){ $('#bprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; } };
+}
+async function parseBooking(){
+  const box=$('#bprev'); box.innerHTML='<div class="empty">Reading and matching…</div>';
+  const aoa=XLSX.utils.sheet_to_json(S.ui.bkWb.Sheets[$('#bsh').value],{header:1,raw:true,defval:null});
+  const hr=aoa.findIndex((r,i)=>i<40 && r && r.some(c=>/^\s*uid/i.test(String(c||''))));
+  if(hr<0){ box.innerHTML='<div class="banner bad">No column “UID” was found in this sheet. Choose the sheet with the booking list.</div>'; return; }
+  const H=aoa[hr].map(h=>String(h||'').replace(/\s+/g,' ').trim().toLowerCase());
+  const data=aoa.slice(hr+1,hr+60);
+  const numShare=i=>{ let n=0,t=0; data.forEach(r=>{ const v=r&&r[i]; if(v===null||v===undefined||v==='') return; t++; if(!isNaN(parseFloat(v))&&isFinite(v)) n++; }); return t?n/t:0; };
+  const find=(...res)=>{ for(const re of res){ const i=H.findIndex(h=>re.test(h)); if(i>=0) return i; } return -1; };
+  const cU=find(/^uid/,/uid/);
+  // qty: the quantity column that really holds numbers ("Booked Qty" in this Synchro report holds the user name)
+  const qc=H.map((h,i)=>({h,i})).filter(x=>/qty|quantity/.test(x.h)).map(x=>({...x, num:numShare(x.i)}));
+  qc.sort((a,b)=>(b.num>0.8)-(a.num>0.8) || (/(book|complet|done|moved|actual|produc)/.test(b.h))-(/(book|complet|done|moved|actual|produc)/.test(a.h)) || b.num-a.num);
+  const cQ=qc.length && qc[0].num>0.8 ? qc[0].i : -1;
+  const cBy=(()=>{ const t=qc.find(x=>x.num<0.2 && /book/.test(x.h)); if(t) return t.i; return find(/booked by|entered by|user|operator/); })();
+  const cD=find(/(book|move|trans|complet|posting).*(date|dt)/,/(date|dt).*(book|move|trans)/);
+  const cP=find(/process area|operation|work ?cent|stage|department|^process/);
+  const col={job:find(/job/), part:find(/part/), die:find(/die|tool/), desc:find(/product|desc/), met:find(/metall/), cust:find(/customer/), wt:find(/black ?wt|black weight|weight/)};
+  const mine=myUploadPids(); const defDate=$('#bd').value||E.todayISO(), defPid=$('#bp').value;
+  const key=t=>String(t||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const pidOf=v=>{ const t=String(v||'').trim(); if(!t) return null; const code=(t.match(/^\s*(\d{3,5})/)||[])[1]; if(code && procById(code)) return code;
+    const p=S.cfg.processes.find(x=>key(x.name)===key(t)) || S.cfg.processes.find(x=>key(t).includes(key(x.name))||key(x.name).includes(key(t))); return p?p.id:null; };
+  let area=null; const recs=[];
+  for(let r=hr+1;r<aoa.length;r++){ const row=aoa[r]||[];
+    const filled=row.filter(v=>v!==null&&v!=='');
+    if(/^process area/i.test(String(row[0]||'').trim())){ area=pidOf(row[1]); continue; }
+    if(filled.length===1 && pidOf(filled[0])){ area=pidOf(filled[0]); continue; }      // stage heading row, e.g. "1060-Knock Out"
+    const uid=String(row[cU]??'').trim(); if(!uid) continue;
+    const q=cQ>=0?parseFloat(row[cQ]):NaN; const d=cD>=0?E.parseDateAny(row[cD]):null;
+    const pid=(cP>=0?pidOf(row[cP]):null)||area||defPid;
+    const g=k=>col[k]>=0?String(row[col[k]]??'').trim():'';
+    recs.push({uid, qty:isNaN(q)?null:Math.round(q), date:d||defDate, pid, row:r+1, by:cBy>=0?String(row[cBy]??'').trim():'',
+      job:g('job'), part:g('part'), die:g('die'), desc:g('desc'), met:g('met').replace(/'/g,''), cust:g('cust'), wt:col.wt>=0?parseFloat(row[col.wt])||0:0}); }
+  const pids=[...new Set(recs.map(x=>x.pid))].filter(x=>mine.includes(x));
+  const open=await openPlanLines(pids, 90, 60);
+  const byUid={}; open.forEach(c=>{ const k=c.pid+'|'+normUID(c.line.uid); (byUid[k]=byUid[k]||[]).push(c); });
+  Object.values(byUid).forEach(l=>l.sort((a,b)=>a.planDate<b.planDate?-1:1));
+  const wipBy={}; S.wip.forEach(w=>{ wipBy[w.processId+'|'+normUID(w.uid)]=w; });
+  // UIDs already booked (any day) for this process – do not book twice
+  const done={}; const xdocs=await Store.getMany(Object.keys(S.planIdx||{}).filter(d=>d>=E.addDays(E.todayISO(),-90)).flatMap(d=>pids.map(p=>'exec/'+d+'/'+p)));
+  xdocs.forEach(x=>{ if(x) (x.lines||[]).forEach(l=>{ if(l.actualQty>0 && l.source && l.source!=='day') done[x.processId+'|'+normUID(l.uid)+'|'+x.date]=1; }); });
+  const matched=[], unplanned=[], notFound=[], otherProc=[], dupInFile=[], already=[]; const seen={};
+  recs.forEach(x=>{
+    if(!mine.includes(x.pid)){ otherProc.push(x); return; }
+    const k=x.pid+'|'+normUID(x.uid); if(seen[k]){ dupInFile.push(x); return; } seen[k]=1;
+    if(done[k+'|'+x.date]){ already.push(x); return; }
+    let need=x.qty; const cands=byUid[k]||[];
+    if(cands.length){ for(const c of cands){ if(need!==null && need<=0) break; const take=need===null?c.remaining:Math.min(need,c.remaining); if(take<=0) continue;
+        matched.push({...x, c, take}); if(need!==null) need-=take; c.remaining-=take; } return; }
+    const w=wipBy[k]; if(w) unplanned.push({...x, w, take:x.qty||w.qty}); else notFound.push({...x, take:x.qty||1}); });
+  S.ui.bk={matched, unplanned, notFound, pids, defDate};
+  const tile=(n,l,c,id)=>`<button class="kpi" data-bl="${id}" style="text-align:left;cursor:pointer;border:1px solid var(--line)"><div class="v num ${c||''}">${fmt(n)}</div><div class="l">${l}</div></button>`;
+  const tbl=(arr,cols)=>arr.length?`<div class="tbl-wrap" style="max-height:360px"><table><thead><tr>${cols.map(c=>`<th>${c[0]}</th>`).join('')}</tr></thead><tbody>${arr.slice(0,800).map((x,i)=>`<tr>${cols.map(c=>`<td>${c[1](x,i)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`:'<div class="empty" style="padding:12px">None.</div>';
+  const chk=(grp,i,on)=>`<input type="checkbox" data-bk="${grp}:${i}" ${on?'checked':''}>`, qin=(grp,i,v)=>`<input type="number" min="1" step="1" data-bq="${grp}:${i}" value="${v}" style="width:62px">`;
+  const L={
+    matched:tbl(matched,[['Book',(x,i)=>chk('m',i,true)],['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Planned for',x=>fday(x.c.planDate)+(x.c.planDate<x.date?' <span class="chip warn">backlog</span>':x.c.planDate>x.date?' <span class="chip blue">ahead</span>':'')],['Booked on',x=>fdate(x.date)],['Qty',(x,i)=>qin('m',i,x.take)],['Job',x=>esc(x.c.line.job)],['Description',x=>esc(descOf(x.c.line))],['Booked by',x=>esc(x.by)]]),
+    unplanned:tbl(unplanned,[['Book',(x,i)=>chk('u',i,true)],['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Booked on',x=>fdate(x.date)],['Qty',(x,i)=>qin('u',i,x.take)],['Job',x=>esc(x.w.job)],['Description',x=>esc(x.w.desc)],['Booked by',x=>esc(x.by)]]),
+    notFound:tbl(notFound,[['Book',(x,i)=>chk('n',i,false)],['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Booked on',x=>fdate(x.date)],['Qty',(x,i)=>qin('n',i,x.take)],['Job',x=>esc(x.job)],['Description',x=>esc(x.desc)],['kg (file)',x=>fmt(x.wt,1)],['Booked by',x=>esc(x.by)]]),
+    already:tbl(already,[['UID',x=>esc(x.uid)],['Booked on',x=>fdate(x.date)],['Note',()=>'already booked for this day – skipped']]),
+    otherProc:tbl(otherProc,[['Row',x=>x.row],['UID',x=>esc(x.uid)],['Process',x=>esc(x.pid||'?')],['Note',()=>'not your process – ignored']]),
+    dup:tbl(dupInFile,[['Row',x=>x.row],['UID',x=>esc(x.uid)],['Note',()=>'same UID again in this file – ignored']])};
+  const days={}; recs.forEach(x=>days[x.date]=(days[x.date]||0)+1);
+  box.innerHTML=`<div class="banner info">${fmt(recs.length)} booking row(s) · ${Object.entries(days).sort().map(([d,n])=>fdate(d)+': '+n).join(' · ')} · columns used: UID “${esc(aoa[hr][cU])}”${cQ>=0?`, qty “${esc(aoa[hr][cQ])}”`:', qty = open planned qty'}${cD>=0?`, date “${esc(aoa[hr][cD])}”`:', date '+fdate(defDate)}${cBy>=0?`, booked by “${esc(aoa[hr][cBy])}”`:''}${cP>=0?`, process “${esc(aoa[hr][cP])}”`:' · process from the stage heading rows'}.</div>
+    <div class="kpis" style="margin-bottom:10px">${tile(matched.length,'Matched to planned lines','ok','matched')}${tile(unplanned.length,'In WIP but not planned','warn','unplanned')}${tile(notFound.length,'Not in WIP / plan (e.g. poured after last WIP upload)',notFound.length?'bad':'','notFound')}${tile(already.length,'Already booked – skipped','','already')}${tile(otherProc.length,'Other process – ignored','','otherProc')}${tile(dupInFile.length,'Duplicate rows – ignored','','dup')}</div>
+    <div id="blist"></div>
+    <div class="row" style="margin-top:12px"><button class="btn heat" id="bgo">Book ticked lines</button><button class="btn ghost" id="bman">Manual entry (line by line)…</button><span class="small muted" id="bcount"></span></div>
+    <p class="small muted">Tick / untick lines and change the qty before booking. Lines “not in WIP” are unticked by default: upload the latest WIP first, or tick them to book with the weight from the booking file.</p>`;
+  const names={matched:'Matched to planned lines',unplanned:'In WIP but not planned – tonnage only',notFound:'Not in WIP / plan',already:'Already booked',otherProc:'Other process',dup:'Duplicate rows'};
+  const showList=id=>{ $('#blist').innerHTML=`<h3>${names[id]}</h3>`+L[id]; bindChecks(); };
+  const state={}; [['m',matched,true],['u',unplanned,true],['n',notFound,false]].forEach(([g,arr,on])=>arr.forEach((x,i)=>{ state[g+':'+i]={on, qty:x.take}; }));
+  const count=()=>{ const n=Object.values(state).filter(v=>v.on).length; $('#bcount').textContent=n+' line(s) ticked for booking'; $('#bgo').disabled=!n; };
+  const bindChecks=()=>{ $('#blist').querySelectorAll('[data-bk]').forEach(c=>{ c.checked=state[c.dataset.bk].on; c.onchange=()=>{ state[c.dataset.bk].on=c.checked; count(); }; });
+    $('#blist').querySelectorAll('[data-bq]').forEach(q=>{ q.value=state[q.dataset.bq].qty; q.onchange=()=>{ state[q.dataset.bq].qty=Math.max(1,Math.round(+q.value||1)); }; }); };
+  box.querySelectorAll('[data-bl]').forEach(b=>b.onclick=()=>showList(b.dataset.bl));
+  showList(matched.length?'matched':unplanned.length?'unplanned':'notFound'); count();
+  $('#bman').onclick=()=>{ S.ui.execTab='search'; S.ui.execProc=pids[0]||defPid; go('exec'); };
+  $('#bgo').onclick=async()=>{ $('#bgo').disabled=true; $('#bgo').textContent='Booking…';
+    try{
+      const entries=[]; const rmk=x=>'Synchro booking'+(x.by?' by '+x.by:'');
+      matched.forEach((x,i)=>{ const st=state['m:'+i]; if(!st.on) return; const q=Math.min(st.qty, x.c.remaining+x.take);
+        entries.push({pid:x.pid, planDate:x.c.planDate, line:x.c.line, qty:q, date:x.date, remarks:rmk(x)}); });
+      unplanned.forEach((x,i)=>{ const st=state['u:'+i]; if(!st.on) return; const w=x.w;
+        entries.push({pid:x.pid, planDate:null, qty:st.qty, date:x.date, remarks:rmk(x)+' – unplanned', line:{id:null, key:w.key, uid:w.uid, job:w.job, part:w.part, die:w.die, desc:w.desc, met:w.met, cust:w.cust, unitWt:w.unitWt}}); });
+      notFound.forEach((x,i)=>{ const st=state['n:'+i]; if(!st.on) return;
+        entries.push({pid:x.pid, planDate:null, qty:st.qty, date:x.date, remarks:rmk(x)+' – not in WIP', line:{id:null, key:E.keyOf(x.pid,x.uid,1), uid:x.uid, job:x.job, part:x.part, die:x.die, desc:x.desc, met:x.met, cust:x.cust, unitWt:(x.wt||0)/(x.qty||1)}}); });
+      if(!entries.length){ toast('Nothing ticked.',true); $('#bgo').disabled=false; $('#bgo').textContent='Book ticked lines'; return; }
+      const n=await bookLines(entries,'synchro');
+      await Store.update('uploads/'+E.todayISO().slice(0,4), d=>{ d=d||{list:[]}; d.list.push({ts:new Date().toISOString(), snapshotDate:defDate, file:S.ui.bkFile, rows:n, kg:entries.reduce((s,e)=>s+e.qty*(+e.line.unitWt||0),0), by:S.user.username, mode:'Synchro booking', pids}); return d; });
+      toast(n+' booking(s) saved as actuals.'); go('booking');
+    }catch(e){ console.error(e); toast('Booking failed: '+e.message,true); $('#bgo').disabled=false; $('#bgo').textContent='Book ticked lines'; } };
+}
+
 /* ===================== DAILY PLAN ===================== */
 const capFor=(pid,date)=>{ const o=S.cfg.capOverrides[date+'|'+pid]; const p=procById(pid); return o!==undefined&&o!==null&&o!==''? +o : (p&&p.capacityMT!==''&&p.capacityMT!==undefined ? +p.capacityMT : +S.cfg.settings.defaultCapMT||5); };
 /* Day-wise plan over several days. Castings already planned on an earlier day whose actuals are not submitted stay
@@ -1482,7 +1599,15 @@ async function publishPlan(start, prev){
 }
 async function recomputeSummary(date,pid){
   const [p,x]=await Store.getMany(['plan/'+date+'/'+pid,'exec/'+date+'/'+pid]);
-  const s=E.summariseDay(p?p.lines:[], x?x.lines:[]); s.capKg=p?p.capKg:null; s.planned=!!p; s.submitted=!!(x&&x.status==='Submitted');
+  const pl=p?p.lines:[], xl=x?(x.lines||[]):[];
+  const s={pq:0,pkg:0,aq:0,akg:0,tq:0,tkg:0,offq:0,offkg:0,sq:0,skg:0,lines:pl.length,done:0,reasons:{}};
+  pl.forEach(l=>{ s.pq+=l.qty; s.pkg+=l.kg;
+    let b=l.bookings? bookedQty(l,date) : xl.filter(e=>(e.planLineId&&e.planLineId===l.id)||(e.batchId&&e.key===l.key)).reduce((t,e)=>t+(+e.actualQty||0),0);
+    const d=Math.min(l.qty,b); s.aq+=d; s.akg+=d*(+l.unitWt||0); if(d>=l.qty) s.done++; });            // adherence: plan lines done by this day
+  xl.forEach(e=>{ const a=+e.actualQty||0, k=e.actualKg!=null?+e.actualKg:a*(+e.unitWt||0); s.tq+=a; s.tkg+=k;   // tonnage: all booked on this day
+    if(e.offPlan){ s.offq+=a; s.offkg+=k; }
+    if(e.shortQty>0){ s.sq+=e.shortQty; s.skg+=+e.shortKg||0; if(e.reason){ const r=s.reasons[e.reason]||(s.reasons[e.reason]={q:0,kg:0,n:0}); r.q+=e.shortQty; r.kg+=+e.shortKg||0; r.n++; } } });
+  s.capKg=p?p.capKg:null; s.planned=!!p; s.submitted=!!(x&&x.status==='Submitted');
   await Store.update('sum/'+date.slice(0,4), d=>{ d=d||{d:{}}; d.d[date]=d.d[date]||{}; d.d[date][pid]=s; return d; });
   S.sums[date]=S.sums[date]||{}; S.sums[date][pid]=s;
 }
@@ -1582,88 +1707,185 @@ async function printWip(list, groupBy){
 }
 
 /* ===================== EXECUTION ENTRY ===================== */
+/* Two tabs: (1) the day's plan – partial submission allowed, open lines carry forward;
+             (2) search any open planned casting (any plan day) and book it on the day it was really processed. */
+const bookedQty=(l,until)=>(l.bookings||[]).filter(b=>!until||b.date<=until).reduce((t,b)=>t+(+b.qty||0),0);
 async function vExec(m){
   const mine=sortedProcs().filter(p=>p.active && p.type!=='HT' && canSeeProc(p.id));
   if(!mine.length){ m.innerHTML=head('Execution entry')+'<div class="empty">No department is assigned to your user. Ask the administrator to assign one.</div>'; return; }
   const pid=S.ui.execProc && mine.some(p=>p.id===S.ui.execProc)? S.ui.execProc : mine[0].id; S.ui.execProc=pid;
+  const tab=S.ui.execTab||'day';
   const today=E.todayISO();
   const dates=Object.entries(S.planIdx||{}).filter(([d,ps])=>ps.includes(pid)).map(([d])=>d).sort().reverse();
   const date=S.ui.execDate || dates.find(d=>d<=today) || today; S.ui.execDate=date;
-  m.innerHTML=head('Execution entry','Enter the completed quantity for every planned line. A shortfall needs a reason before the day can be submitted.',
-    `<label class="field">Department<select id="ep">${mine.map(p=>`<option value="${p.id}" ${p.id===pid?'selected':''}>${esc(p.id+' · '+p.name)}</option>`).join('')}</select></label>
-     ${dayNav(date)}`)+dayStrip(date,[pid])+`<h2 style="margin-top:14px">${fday(date)}</h2>`+'<div id="ebody"></div>';
+  m.innerHTML=head('Execution entry', tab==='day'?'Enter what was done on the plan day. You can submit with open lines – they carry forward to the next working day.':'Find any open planned casting (any plan day) and book it on the day it was actually processed.',
+    `<label class="field">Department<select id="ep">${mine.map(p=>`<option value="${p.id}" ${p.id===pid?'selected':''}>${esc(p.id+' · '+p.name)}</option>`).join('')}</select></label>${tab==='day'?dayNav(date):''}`)
+    +`<div class="tabs"><button data-et="day" aria-selected="${tab==='day'}">Day plan</button><button data-et="search" aria-selected="${tab==='search'}">Search Job / UID &amp; book</button></div>`
+    +(tab==='day'? dayStrip(date,[pid])+`<h2 style="margin-top:14px">${fday(date)}</h2>`:'')+'<div id="ebody"></div>';
   $('#ep').onchange=e=>{ S.ui.execProc=e.target.value; go('exec'); };
+  m.querySelectorAll('[data-et]').forEach(b=>b.onclick=()=>{ S.ui.execTab=b.dataset.et; go('exec'); });
+  if(tab==='search') return execSearch(pid);
   bindDayNav(m, date, d=>{ S.ui.execDate=d; go('exec'); });
   const [plan, ex]=await Store.getMany(['plan/'+date+'/'+pid,'exec/'+date+'/'+pid]);
+  const xl=(ex&&ex.lines)||[];
+  const offLines=xl.filter(l=>l.source && l.source!=='day');        // booked on this date via search / Synchro
+  const offHtml=offLines.length?`<h2>Also booked on ${fdate(date)} (${offLines.length})</h2><div class="tbl-wrap" style="max-height:260px"><table><thead><tr><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Planned for</th><th class="r">Actual qty</th><th class="r">kg</th><th>Booked via</th><th>By</th></tr></thead><tbody>
+      ${offLines.map(l=>`<tr><td><b>${esc(l.uid)}</b></td><td>${esc(l.job)}</td><td>${esc(l.die||'')}</td><td class="wrap">${esc(l.desc||'')}</td><td>${l.planDate?(l.planDate===date?'this day':fdate(l.planDate)):'<span class="chip warn">unplanned</span>'}</td><td class="r num">${fmt(l.actualQty)}</td><td class="r num">${fmt(l.actualKg,1)}</td><td>${esc(l.source==='synchro'?'Synchro booking':'UID search')}</td><td>${esc(l.bookedBy||'')}</td></tr>`).join('')}</tbody></table></div>`:'';
   if(!plan){ const st=dayStatus(date,[pid]);
-    $('#ebody').innerHTML=`<div class="empty">${st.txt==='Off day'?'This is an off day for '+esc(procName(pid))+'.':'No plan has been published for '+esc(procName(pid))+' on '+fday(date)+'.'}${dates.length?`<br><button class="btn ghost sm" style="margin-top:10px" data-day="${dates.find(d=>d<=today)||dates[0]}">Go to latest plan (${fday(dates.find(d=>d<=today)||dates[0])})</button>`:''}</div>`;
+    $('#ebody').innerHTML=`<div class="empty">${st.txt==='Off day'?'This is an off day for '+esc(procName(pid))+'.':'No plan has been published for '+esc(procName(pid))+' on '+fday(date)+'.'}${dates.length?`<br><button class="btn ghost sm" style="margin-top:10px" data-day="${dates.find(d=>d<=today)||dates[0]}">Go to latest plan (${fday(dates.find(d=>d<=today)||dates[0])})</button>`:''}</div>`+offHtml;
     bindDayNav($('#ebody'), date, d=>{ S.ui.execDate=d; go('exec'); }); return; }
   const submitted=ex && ex.status==='Submitted';
-  const prevBy={}; ((ex&&ex.lines)||[]).forEach(l=>prevBy[l.planLineId||l.key]=l);
+  const dayBy={}; xl.filter(l=>!l.source||l.source==='day').forEach(l=>dayBy[l.planLineId||l.key]=l);
   const reasons=S.cfg.reasons;
-  const rows=plan.lines.map((l,i)=>{ const x=prevBy[l.id]||prevBy[l.key]||{};
-    const a=x.actualQty??''; return `<tr data-i="${i}"><td><b>${esc(l.uid)}</b></td><td>${esc(l.job)}</td><td>${esc(toolOf(l))}</td><td class="wrap">${esc(descOf(l))}</td><td>${esc(l.met)}</td>
+  const info=plan.lines.map(l=>{ const other=(l.bookings||[]).filter(b=>b.src!=='day'); const ob=other.reduce((t,b)=>t+b.qty,0);
+    return {l, ob, other, rem:Math.max(0,l.qty-ob), x:dayBy[l.id]||dayBy[l.key]||{}}; });
+  const rows=info.map((r,i)=>{ const l=r.l, x=r.x; const a=x.actualQty??'';
+    const bookedTxt=r.other.length?`<div class="small" style="color:var(--ok)">✔ booked ${r.other.map(b=>fdate(b.date)+' ×'+b.qty).join(', ')}</div>`:'';
+    const closed=r.rem<=0;
+    return `<tr data-i="${i}" ${closed?'style="background:#F3FAF5"':''}><td><b>${esc(l.uid)}</b>${bookedTxt}</td><td>${esc(l.job)}</td><td>${esc(toolOf(l))}</td><td class="wrap">${esc(descOf(l))}</td><td>${esc(l.met)}</td>
       <td><span class="chip ${l.group===0?'heat':l.group===1?'bad':'mute'}">${esc(l.groupLabel)}</span></td>
       <td class="r num">${fmt(l.qty)}</td><td class="r num">${fmt(l.kg,1)}</td>
-      <td><input type="number" min="0" step="1" class="act" value="${a}" ${submitted?'disabled':''} aria-label="Actual qty for ${esc(l.uid)}"></td>
+      <td>${closed?'<span class="chip ok">Done</span>':`<input type="number" min="0" max="${r.rem}" step="1" class="act" value="${a}" ${submitted?'disabled':''} placeholder="${r.rem<l.qty?'open '+r.rem:''}" aria-label="Actual qty for ${esc(l.uid)}" style="width:80px">`}</td>
       <td class="r num sf">–</td><td class="r num ad">–</td>
-      <td><select class="rsn" ${submitted?'disabled':''}><option value="">–</option>${reasons.map(r=>`<option ${x.reason===r?'selected':''}>${esc(r)}</option>`).join('')}</select></td>
-      <td><input class="rmk" value="${esc(x.remarks||'')}" ${submitted?'disabled':''} style="width:160px"></td></tr>`; }).join('');
+      <td>${closed?'':`<select class="rsn" ${submitted?'disabled':''}><option value="">–</option>${reasons.map(x2=>`<option ${x.reason===x2?'selected':''}>${esc(x2)}</option>`).join('')}</select>`}</td>
+      <td>${closed?'':`<input class="rmk" value="${esc(x.remarks||'')}" ${submitted?'disabled':''} style="width:150px">`}</td></tr>`; }).join('');
   $('#ebody').innerHTML=`<div class="panel" style="margin-bottom:12px"><div class="row" style="justify-content:space-between">
      <div><b>${esc(pid+' · '+procName(pid))}</b> · plan of ${fdate(date)} · ${plan.lines.length} lines · ${mt(plan.lines.reduce((s,l)=>s+l.kg,0))} MT</div>
      <div class="row"><button class="btn ghost sm" id="eprint">Print sheet</button>${submitted?`<span class="chip ok">Submitted ${fdt(ex.submittedAt)} by ${esc(ex.submittedBy)}</span>`:'<span class="chip warn">Open</span>'}</div></div>
      <div class="kpis" style="margin-top:12px" id="esum"></div></div>
-   ${plan.lines.length?`<div class="row" style="margin-bottom:8px">${submitted?'':'<button class="btn ghost sm" id="eall">Fill actual = planned for empty rows</button>'}</div>
+   ${plan.lines.length?`<div class="row" style="margin-bottom:8px">${submitted?'':'<button class="btn ghost sm" id="eall">Fill actual = open qty for empty rows</button>'}<span class="small muted">Lines booked on another day show ✔ and are already counted.</span></div>
    <div class="tbl-wrap"><table><thead><tr><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Priority</th><th class="r">Planned qty</th><th class="r">Planned kg</th><th>Actual qty</th><th class="r">Shortfall</th><th class="r">Adherence</th><th>Shortfall reason</th><th>Remarks</th></tr></thead><tbody id="erows">${rows}</tbody></table></div>`:'<div class="empty">This plan has no lines.</div>'}
-   <div class="row" style="margin-top:14px">${submitted? (isRole('Admin')?'<button class="btn danger" id="ereopen">Reopen for correction</button>':'') : '<button class="btn ghost" id="esave">Save draft</button><button class="btn heat" id="esub">Submit actuals</button>'}<span id="emsg" class="small"></span></div>`;
-  const recalc=()=>{ let pq=0,aq=0,pk=0,ak=0,sq=0,miss=0,need=0;
-    $('#erows')&&$('#erows').querySelectorAll('tr').forEach(tr=>{ const l=plan.lines[+tr.dataset.i]; const inp=tr.querySelector('.act'); const v=inp.value===''?null:+inp.value;
-      pq+=l.qty; pk+=l.kg; const sfC=tr.querySelector('.sf'), adC=tr.querySelector('.ad'), rs=tr.querySelector('.rsn');
-      if(v===null||isNaN(v)){ miss++; sfC.textContent='–'; adC.textContent='–'; rs.classList.remove('invalid'); return; }
-      const sf=Math.max(0,l.qty-v); aq+=v; ak+=v*l.unitWt; sq+=sf; sfC.textContent=fmt(sf); adC.textContent=pctTxt(pct(v,l.qty));
+   <div class="row" style="margin-top:14px">${submitted? (isRole('Admin')?'<button class="btn danger" id="ereopen">Reopen for correction</button>':'') : '<button class="btn ghost" id="esave">Save draft</button><button class="btn heat" id="esub">Submit actuals</button>'}<span id="emsg" class="small"></span></div>`+offHtml;
+  const recalc=()=>{ let pq=0,done=0,pk=0,dk=0,sq=0,blank=0,need=0;
+    $('#erows')&&$('#erows').querySelectorAll('tr').forEach(tr=>{ const r=info[+tr.dataset.i], l=r.l; pq+=l.qty; pk+=l.kg; done+=Math.min(l.qty,r.ob); dk+=Math.min(l.qty,r.ob)*l.unitWt;
+      const inp=tr.querySelector('.act'); if(!inp) return; const v=inp.value===''?null:+inp.value; const sfC=tr.querySelector('.sf'), adC=tr.querySelector('.ad'), rs=tr.querySelector('.rsn');
+      if(v===null||isNaN(v)){ blank++; sfC.textContent='–'; adC.textContent='–'; rs.classList.remove('invalid'); return; }
+      const sf=Math.max(0,r.rem-v); done+=Math.min(v,r.rem); dk+=Math.min(v,r.rem)*l.unitWt; sq+=sf; sfC.textContent=fmt(sf); adC.textContent=pctTxt(pct(v+r.ob,l.qty));
       sfC.style.color=sf>0?'var(--bad)':''; if(sf>0 && !rs.value){ need++; rs.classList.add('invalid'); } else rs.classList.remove('invalid'); });
-    const ad=pct(aq,pq);
-    $('#esum').innerHTML=`<div class="kpi"><div class="v num">${fmt(pq)}</div><div class="l">Planned qty</div></div><div class="kpi"><div class="v num">${fmt(aq)}</div><div class="l">Actual qty</div></div>
-      <div class="kpi ${sq>0?'bad':''}"><div class="v num">${fmt(sq)}</div><div class="l">Shortfall qty</div></div><div class="kpi ${ragClass(ad)}"><div class="v num">${pctTxt(ad)}</div><div class="l">Plan adherence (qty)</div></div>
-      <div class="kpi ${ragClass(pct(ak,pk))}"><div class="v num">${pctTxt(pct(ak,pk))}</div><div class="l">Weight adherence</div></div><div class="kpi ${miss||need?'warn':'ok'}"><div class="v num">${miss+need}</div><div class="l">Rows still needing input</div></div>`;
-    return {miss,need}; };
+    const ad=pct(done,pq);
+    $('#esum').innerHTML=`<div class="kpi"><div class="v num">${fmt(pq)}</div><div class="l">Planned qty</div></div><div class="kpi"><div class="v num">${fmt(done)}</div><div class="l">Done (incl. booked on other days)</div></div>
+      <div class="kpi ${ragClass(ad)}"><div class="v num">${pctTxt(ad)}</div><div class="l">Plan adherence (qty)</div></div><div class="kpi ${ragClass(pct(dk,pk))}"><div class="v num">${pctTxt(pct(dk,pk))}</div><div class="l">Weight adherence</div></div>
+      <div class="kpi ${blank?'warn':''}"><div class="v num">${blank}</div><div class="l">Open lines – carry forward if left empty</div></div><div class="kpi ${need?'bad':''}"><div class="v num">${need}</div><div class="l">Partial lines needing a reason</div></div>
+      <div class="kpi"><div class="v num">${mt(offLines.reduce((s,l)=>s+(l.actualKg||0),0))}</div><div class="l">MT booked via search / Synchro on this day</div></div>`;
+    return {blank,need}; };
   recalc();
   $('#erows')&&$('#erows').addEventListener('input',recalc); $('#erows')&&$('#erows').addEventListener('change',recalc);
-  const collect=()=>[...$('#erows').querySelectorAll('tr')].map(tr=>{ const l=plan.lines[+tr.dataset.i]; const v=tr.querySelector('.act').value; const a=v===''?null:Math.max(0,Math.round(+v));
-    const sf=a===null?null:Math.max(0,l.qty-a);
-    return {planLineId:l.id, key:l.key, uid:l.uid, job:l.job, part:l.part, die:toolOf(l), desc:descOf(l), met:l.met, cust:l.cust, plannedQty:l.qty, plannedKg:l.kg, unitWt:l.unitWt,
-      actualQty:a, actualKg:a===null?null:a*l.unitWt, shortQty:sf, shortKg:sf===null?null:sf*l.unitWt, reason:sf>0?tr.querySelector('.rsn').value:'', remarks:tr.querySelector('.rmk').value.trim(), cfIds:l.cfIds||[]}; });
-  $('#eprint').onclick=()=>printPlan(date,[pid],{delay:true});
-  if($('#eall')) $('#eall').onclick=()=>{ $('#erows').querySelectorAll('tr').forEach(tr=>{ const i=tr.querySelector('.act'); if(i.value==='') i.value=plan.lines[+tr.dataset.i].qty; }); recalc(); };
-  if($('#esave')) $('#esave').onclick=async()=>{ await Store.set('exec/'+date+'/'+pid,{date,processId:pid,status:'Draft',lines:collect(),savedAt:new Date().toISOString(),savedBy:S.user.username}); toast('Draft saved.'); };
-  if($('#esub')) $('#esub').onclick=async()=>{
-    const {miss,need}=recalc();
-    if(miss||need){ $('#emsg').innerHTML=`<span style="color:var(--bad)">Not submitted: ${miss?miss+' row(s) without actual qty':''}${miss&&need?' and ':''}${need?need+' shortfall row(s) without a reason':''}.</span>`; return; }
-    const lines=collect().map(l=>({...l, actualQty:l.actualQty, shortQty:l.shortQty}));
-    $('#esub').disabled=true;
+  const collect=(final)=>[...$('#erows').querySelectorAll('tr')].map(tr=>{ const r=info[+tr.dataset.i], l=r.l; const inp=tr.querySelector('.act'); if(!inp) return null;
+    let a=inp.value===''?null:Math.max(0,Math.min(r.rem,Math.round(+inp.value)));
+    let reason=tr.querySelector('.rsn').value;
+    if(final && a===null){ a=0; if(!reason) reason='Not processed – carried forward'; }
+    const sf=a===null?null:Math.max(0,r.rem-a);
+    return {planLineId:l.id, planDate:date, source:'day', offPlan:false, key:l.key, uid:l.uid, job:l.job, part:l.part, die:toolOf(l), desc:descOf(l), met:l.met, cust:l.cust, plannedQty:r.rem, plannedKg:r.rem*l.unitWt, unitWt:l.unitWt,
+      actualQty:a, actualKg:a===null?null:a*l.unitWt, shortQty:sf, shortKg:sf===null?null:sf*l.unitWt, reason:sf>0?reason:'', remarks:tr.querySelector('.rmk').value.trim(), cfIds:l.cfIds||[]}; }).filter(Boolean);
+  if($('#eprint')) $('#eprint').onclick=()=>printPlan(date,[pid],{delay:true});
+  if($('#eall')) $('#eall').onclick=()=>{ $('#erows').querySelectorAll('tr').forEach(tr=>{ const i=tr.querySelector('.act'); if(i && i.value==='') i.value=info[+tr.dataset.i].rem; }); recalc(); };
+  if($('#esave')) $('#esave').onclick=async()=>{ const lines=collect(false);
+    await Store.update('exec/'+date+'/'+pid, d=>{ d=d||{date,processId:pid,lines:[]}; d.lines=(d.lines||[]).filter(l=>l.source && l.source!=='day').concat(lines); d.status='Draft'; d.savedAt=new Date().toISOString(); d.savedBy=S.user.username; return d; }); toast('Draft saved.'); };
+  const doSubmit=async()=>{
+    const lines=collect(true); $('#esub').disabled=true;
     try{
       const cur=await Store.get('exec/'+date+'/'+pid); if(cur && cur.status==='Submitted'){ toast('Already submitted by '+cur.submittedBy+'.',true); return go('exec'); }
-      await Store.set('exec/'+date+'/'+pid,{date,processId:pid,status:'Submitted',lines,submittedAt:new Date().toISOString(),submittedBy:S.user.username});
+      const stamp=new Date().toISOString();
+      await Store.update('exec/'+date+'/'+pid, d=>{ d=d||{date,processId:pid,lines:[]}; d.lines=(d.lines||[]).filter(l=>l.source && l.source!=='day').concat(lines);
+        d.status='Submitted'; d.submittedAt=stamp; d.submittedBy=S.user.username; return d; });
+      await Store.update('plan/'+date+'/'+pid, d=>{ if(!d) return d; lines.forEach(x=>{ if(!(x.actualQty>0)) return; const l=d.lines.find(y=>y.id===x.planLineId); if(l) (l.bookings=l.bookings||[]).push({date, qty:x.actualQty, kg:x.actualKg, src:'day', by:S.user.username, ts:stamp}); }); return d; });
       await applyCarryForward(date,pid,lines);
       let moved=0;
       if(routingOn()){ const mv=await transferWip(date, pid, lines.filter(l=>l.actualQty>0).map(l=>({key:l.key, qty:l.actualQty})));
         moved=mv.reduce((s,x)=>s+x.qty,0); await Store.update('exec/'+date+'/'+pid, x=>{ x.moves=mv; return x; }); }
       await recomputeSummary(date,pid);
-      await audit('Submit actuals', pid+' '+date+' – '+lines.length+' lines, shortfall '+lines.reduce((s,l)=>s+l.shortQty,0));
+      const cf=lines.filter(l=>l.shortQty>0).length;
+      await audit('Submit actuals', pid+' '+date+' – '+lines.length+' open lines, done '+lines.filter(l=>l.actualQty>0).length+', carried forward '+cf);
       if(routingOn()){ await reloadWip(); await writeSnapshot(E.todayISO()); } else { await loadReported(); derive(); }
-      toast('Actuals submitted for '+fdate(date)+'.'+(moved?' '+moved+' pcs moved to the next stage.':'')); go('exec');
+      toast('Submitted for '+fdate(date)+'.'+(cf?' '+cf+' line(s) carried forward.':'')+(moved?' '+moved+' pcs moved to the next stage.':'')); go('exec');
     }catch(e){ console.error(e); toast('Submit failed: '+e.message,true); $('#esub').disabled=false; }
   };
-  if($('#ereopen')) $('#ereopen').onclick=()=>modal('Reopen actuals','<p>Reopening lets the department correct and resubmit. Carry-forward created by this submission is withdrawn until it is submitted again.</p><label class="field">Reason for correction<input id="rr" style="width:100%"></label>',[
+  if($('#esub')) $('#esub').onclick=()=>{
+    const {blank,need}=recalc();
+    if(need){ $('#emsg').innerHTML=`<span style="color:var(--bad)">Not submitted: ${need} line(s) have an actual below the open qty but no reason.</span>`; return; }
+    if(blank) return modal('Submit with open lines', `<p><b>${blank}</b> line(s) have no actual qty. They will be recorded as <b>not processed</b> and <b>carried forward to the next working day</b> (reason “Not processed – carried forward”, unless you chose another).</p><p class="small muted">If a casting was processed but is just not entered yet, you can still book it later with “Search Job / UID &amp; book”.</p>`,
+      [{label:'Submit and carry forward', cls:'heat', fn:async()=>{ await doSubmit(); }}]);
+    doSubmit();
+  };
+  if($('#ereopen')) $('#ereopen').onclick=()=>modal('Reopen actuals','<p>Reopening lets the department correct and resubmit. Carry-forward created by this submission is withdrawn until it is submitted again. Bookings made via search / Synchro stay.</p><label class="field">Reason for correction<input id="rr" style="width:100%"></label>',[
     {label:'Reopen',cls:'danger',fn:async d=>{ const why=d.querySelector('#rr').value.trim(); if(!why){ d.querySelector('#rr').classList.add('invalid'); return false; }
       const cur=await Store.get('exec/'+date+'/'+pid); let rv=null;
       if(cur && cur.moves && cur.moves.length) rv=await reverseMoves(date, cur.moves);
       await Store.update('exec/'+date+'/'+pid, x=>{ x.status='Draft'; x.reopenedAt=new Date().toISOString(); x.reopenedBy=S.user.username; x.reopenReason=why; x.moves=[]; return x; });
-      if(rv) toast(rv.back+' pcs returned to this stage'+(rv.missing?'; '+rv.missing+' pcs were already processed further and stay there':'')+'.', !!rv.missing);
+      await Store.update('plan/'+date+'/'+pid, x=>{ if(!x) return x; x.lines.forEach(l=>{ if(l.bookings) l.bookings=l.bookings.filter(b=>!(b.src==='day' && b.date===date)); }); return x; });
       await updateCF(list=>{ list.forEach(c=>{ if(c.fromDate===date && c.processId===pid && c.status==='Open'){ c.status='Superseded'; c.closeNote='Withdrawn: actuals reopened'; } }); });
+      if(rv) toast(rv.back+' pcs returned to this stage'+(rv.missing?'; '+rv.missing+' pcs were already processed further':'')+'.', !!rv.missing);
       await recomputeSummary(date,pid); await audit('Reopen actuals', pid+' '+date+' – '+why); if(routingOn()) await reloadWip(); else { await loadReported(); derive(); } go('exec'); }}]);
 }
-/* shortfall -> new carry-forward; carried lines that were completed -> closed. One open record per UID, so nothing is lost or doubled. */
+
+/* ---------- open planned lines (any plan day whose actuals are not submitted yet) ---------- */
+async function openPlanLines(pids, back=45, fwd=30){
+  const today=E.todayISO(), from=E.addDays(today,-back), to=E.addDays(today,fwd); const idx=S.planIdx||{};
+  const pairs=[]; Object.keys(idx).filter(d=>d>=from && d<=to).sort().forEach(d=>idx[d].forEach(pid=>{ if(pids.includes(pid)) pairs.push([d,pid]); }));
+  const docs=await Store.getMany(pairs.flatMap(([d,pid])=>['plan/'+d+'/'+pid,'exec/'+d+'/'+pid]));
+  const out=[];
+  pairs.forEach(([d,pid],i)=>{ const p=docs[2*i], x=docs[2*i+1]; if(!p || (x && x.status==='Submitted')) return;
+    p.lines.forEach(l=>{ const b=bookedQty(l); const rem=l.qty-b; if(rem>0) out.push({pid, planDate:d, line:l, booked:b, remaining:rem}); }); });
+  return out;
+}
+/* book actual quantities: exec line on the ACTUAL date, booking on the PLAN line, routing move, summaries for both days */
+async function bookLines(entries, src){
+  if(!entries.length) return 0;
+  const now=new Date().toISOString(); const touched=new Set();
+  const grp=(f)=>{ const g={}; entries.forEach(e=>{ const k=f(e); if(k) (g[k]=g[k]||[]).push(e); }); return g; };
+  for(const [k,list] of Object.entries(grp(e=>e.date+'|'+e.pid))){ const [date,pid]=k.split('|');
+    await Store.update('exec/'+date+'/'+pid, d=>{ d=d||{date,processId:pid,status:'Open',lines:[]}; d.lines=d.lines||[];
+      list.forEach(e=>{ const l=e.line, uw=+l.unitWt||0;
+        d.lines.push({planLineId:l.id||null, planDate:e.planDate||null, offPlan:e.planDate!==date, source:src, key:l.key, uid:l.uid, job:l.job, part:l.part, die:toolOf(l), desc:descOf(l), met:l.met, cust:l.cust||'',
+          plannedQty:e.planDate===date?e.qty:0, plannedKg:e.planDate===date?e.qty*uw:0, unitWt:uw, actualQty:e.qty, actualKg:e.qty*uw, shortQty:0, shortKg:0, reason:'', remarks:e.remarks||'', bookedBy:S.user.username, bookedAt:now}); });
+      return d; });
+    touched.add(date+'|'+pid); }
+  const closeCF=[];
+  for(const [k,list] of Object.entries(grp(e=>e.planDate?e.planDate+'|'+e.pid:null))){ const [pd,pid]=k.split('|');
+    await Store.update('plan/'+pd+'/'+pid, d=>{ if(!d) return d; list.forEach(e=>{ const l=d.lines.find(x=>x.id===e.line.id); if(!l) return;
+      (l.bookings=l.bookings||[]).push({date:e.date, qty:e.qty, kg:e.qty*(+l.unitWt||0), src, by:S.user.username, ts:now});
+      if((l.cfIds||[]).length && bookedQty(l)>=l.qty) closeCF.push({date:e.date, pid, line:{key:l.key, shortQty:0, cfIds:l.cfIds}}); }); return d; });
+    touched.add(pd+'|'+pid); }
+  for(const c of closeCF) await applyCarryForward(c.date, c.pid, [c.line]);
+  if(routingOn()) for(const [k,list] of Object.entries(grp(e=>e.date+'|'+e.pid))){ const [date,pid]=k.split('|'); await transferWip(date, pid, list.map(e=>({key:e.line.key, qty:e.qty}))); }
+  for(const t of touched){ const [d,p]=t.split('|'); await recomputeSummary(d,p); }
+  await Store.update('planidx', d=>{ d=d||{dates:{}}; entries.forEach(e=>{ d.dates[e.date]=Array.from(new Set([...(d.dates[e.date]||[]), e.pid])); }); return d; });
+  S.planIdx=((await Store.get('planidx'))||{dates:{}}).dates;
+  await audit('Book actuals ('+(src==='synchro'?'Synchro booking':'UID search')+')', entries.length+' line(s): '+entries.slice(0,20).map(e=>e.line.uid+'×'+e.qty+'@'+e.date).join(', '));
+  if(routingOn()){ await reloadWip(); await writeSnapshot(E.todayISO()); } else { await loadReported(); derive(); }
+  return entries.length;
+}
+async function execSearch(pid){
+  const body=$('#ebody'); body.innerHTML='<div class="empty">Loading open planned castings…</div>';
+  const cand=await openPlanLines([pid]);
+  const q=(S.ui.exQ||'').trim().toLowerCase(); const actDate=S.ui.exDate||E.todayISO();
+  const hits=cand.filter(c=>!q || [c.line.uid,c.line.job,toolOf(c.line),descOf(c.line),c.line.part].join(' ').toLowerCase().includes(q))
+    .sort((a,b)=>a.planDate<b.planDate?-1:a.planDate>b.planDate?1:0);
+  body.innerHTML=`<div class="panel" style="margin-bottom:12px"><div class="row" style="align-items:flex-end">
+      <label class="field">Search UID, Job, Tooling no. or description<input id="exq" value="${esc(S.ui.exQ||'')}" placeholder="e.g. 26BLV/1 or J26/1057" style="width:300px" autofocus></label>
+      <label class="field">Actual date (day it was processed)<input type="date" id="exd" value="${actDate}"></label>
+      <span class="small muted">${fmt(cand.length)} open planned line(s) for ${esc(pid+' '+procName(pid))} from ${fdate(E.addDays(E.todayISO(),-45))} to ${fdate(E.addDays(E.todayISO(),30))}.</span></div></div>
+    ${hits.length?`<div class="tbl-wrap" style="max-height:520px"><table><thead><tr><th><input type="checkbox" id="exall" aria-label="Select all"></th><th>Planned for</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th class="r">Planned</th><th class="r">Booked</th><th class="r">Open</th><th>Actual qty</th><th>Remarks</th></tr></thead><tbody>
+      ${hits.slice(0,300).map((c,i)=>`<tr><td><input type="checkbox" data-xs="${i}"></td><td>${fday(c.planDate)}${c.planDate<E.todayISO()?' <span class="chip warn">backlog</span>':c.planDate>E.todayISO()?' <span class="chip blue">ahead</span>':''}</td><td><b>${esc(c.line.uid)}</b></td><td>${esc(c.line.job)}</td><td>${esc(toolOf(c.line))}</td><td class="wrap">${esc(descOf(c.line))}</td><td>${esc(c.line.met)}</td>
+        <td class="r num">${fmt(c.line.qty)}</td><td class="r num">${fmt(c.booked)}</td><td class="r num">${fmt(c.remaining)}</td>
+        <td><input type="number" min="1" max="${c.remaining}" step="1" data-xq="${i}" value="${c.remaining}" style="width:70px"></td><td><input data-xr="${i}" style="width:140px"></td></tr>`).join('')}</tbody></table></div>
+      <div class="row" style="margin-top:12px"><button class="btn heat" id="exbook">Book selected on ${fdate(actDate)}</button><span class="small muted">Booked qty counts as actual on the actual date (tonnage) and as done for its plan day (adherence).</span></div>`
+     :'<div class="empty">'+(q?'No open planned casting matches “'+esc(S.ui.exQ)+'”. It may already be booked, or its plan day was already submitted (then it was carried forward to a later day).':'No open planned castings.')+'</div>'}`;
+  const qi=$('#exq'); let t; qi.oninput=()=>{ clearTimeout(t); t=setTimeout(()=>{ S.ui.exQ=qi.value; execSearch(pid).then(()=>{ const n=$('#exq'); n.focus(); n.setSelectionRange(n.value.length,n.value.length); }); },350); };
+  $('#exd').onchange=e=>{ S.ui.exDate=e.target.value; execSearch(pid); };
+  if($('#exall')) $('#exall').onchange=e=>body.querySelectorAll('[data-xs]').forEach(c=>c.checked=e.target.checked);
+  if(hits.length===1) body.querySelector('[data-xs]').checked=true;
+  if($('#exbook')) $('#exbook').onclick=async()=>{
+    const sel=[...body.querySelectorAll('[data-xs]:checked')].map(c=>+c.dataset.xs);
+    if(!sel.length) return toast('Tick the casting(s) to book.',true);
+    const entries=[]; for(const i of sel){ const c=hits[i]; const qn=Math.round(+body.querySelector(`[data-xq="${i}"]`).value||0);
+      if(qn<1||qn>c.remaining) return toast('Qty for '+c.line.uid+' must be between 1 and '+c.remaining+'.',true);
+      entries.push({pid:c.pid, planDate:c.planDate, line:c.line, qty:qn, date:actDate, remarks:body.querySelector(`[data-xr="${i}"]`).value.trim()}); }
+    $('#exbook').disabled=true;
+    try{ const n=await bookLines(entries,'search'); toast(n+' casting(s) booked on '+fdate(actDate)+'.'); S.ui.exQ=''; go('exec'); }
+    catch(e){ console.error(e); toast('Booking failed: '+e.message,true); $('#exbook').disabled=false; }
+  };
+}
 async function applyCarryForward(date, pid, lines){
   const now=new Date().toISOString();
   await updateCF(list=>{
@@ -1924,7 +2146,10 @@ async function batchAction(act, id){
       if(bad){ toast('Choose a shortfall reason for every short line.',true); return false; }
       const rec=S.cfg.recipes.find(r=>r.id===b.recipeId)||{sequence:1};
       const fin={...b, status:'Completed', actualStart:st, actualEnd:end, actualH:dur, actualKg:ex.reduce((s,x)=>s+x.actualKg,0), overrunH:Math.max(0,dur-b.cycleH), delayReason:pdr, completedBy:S.user.username};
+      ex.forEach(x=>{ x.planDate=planDate; x.source='batch'; });
       await Store.update('exec/'+planDate+'/'+hp.id, x=>{ x=x||{date:planDate,processId:hp.id,status:'Batch',lines:[]}; x.lines.push(...ex); return x; });
+      await Store.update('plan/'+planDate+'/'+hp.id, d=>{ if(!d) return d; const ts=new Date().toISOString(); ex.forEach(x=>{ if(!(x.actualQty>0)) return; const l=d.lines.find(y=>y.key===x.key && y.batchId===b.id) || d.lines.find(y=>y.key===x.key);
+        if(l) (l.bookings=l.bookings||[]).push({date:planDate, qty:x.actualQty, kg:x.actualKg, src:'batch', by:S.user.username, ts}); }); return d; });
       await applyCarryForward(planDate, hp.id, ex);
       S.htProgress=await Store.update('ht/progress', p=>{ p=p||{}; ex.forEach(x=>{ if(x.shortQty===0) p[x.key]=Math.max(p[x.key]||0, rec.sequence||1); }); return p; });
       if(routingOn()){ const reqs=ex.filter(x=>x.actualQty>0 && !E.recipeChain(x.met,S.cfg.recipes).some(r=>(r.sequence||1)>(S.htProgress[x.key]||0))).map(x=>({key:x.key, qty:x.actualQty}));
@@ -2019,11 +2244,12 @@ function rangeFor(kind, anchor){
 }
 /* Adherence counts only closed plan days (actuals submitted, or the day is over), so a plan still being worked on is not shown as 0 %. */
 function agg(from,to,pid){
-  const a={pq:0,pkg:0,aq:0,akg:0,sq:0,skg:0,cap:0,capAkg:0,pqC:0,pkgC:0,aqC:0,akgC:0,pending:0,reasons:{}}; const today=E.todayISO();
+  const a={pq:0,pkg:0,aq:0,akg:0,sq:0,skg:0,offq:0,offkg:0,cap:0,capAkg:0,pqC:0,pkgC:0,aqC:0,akgC:0,pending:0,reasons:{}}; const today=E.todayISO();
   Object.entries(S.sums).forEach(([d,v])=>{ if(d<from||d>to) return; Object.entries(v).forEach(([p,s])=>{ if(pid && p!==pid) return;
-    a.pq+=s.pq; a.pkg+=s.pkg; a.aq+=s.aq; a.akg+=s.akg; a.sq+=s.sq; a.skg+=s.skg;
+    const tq=s.tq!==undefined?s.tq:s.aq, tkg=s.tkg!==undefined?s.tkg:s.akg;
+    a.pq+=s.pq; a.pkg+=s.pkg; a.aq+=tq; a.akg+=tkg; a.sq+=s.sq; a.skg+=s.skg; a.offq+=s.offq||0; a.offkg+=s.offkg||0;
     const closed=s.submitted || d<today;
-    if(closed){ a.pqC+=s.pq; a.pkgC+=s.pkg; a.aqC+=s.aq; a.akgC+=s.akg; if(s.capKg){ a.cap+=s.capKg; a.capAkg+=s.akg; } } else if(s.pq>0) a.pending++;
+    if(closed){ a.pqC+=s.pq; a.pkgC+=s.pkg; a.aqC+=s.aq; a.akgC+=s.akg; if(s.capKg){ a.cap+=s.capKg; a.capAkg+=tkg; } } else if(s.pq>0) a.pending++;
     Object.entries(s.reasons||{}).forEach(([r,x])=>{ const t=a.reasons[r]=a.reasons[r]||{q:0,kg:0}; t.q+=x.q; t.kg+=x.kg; }); }); });
   a.adq=pct(a.aqC,a.pqC); a.adw=pct(a.akgC,a.pkgC); a.util=pct(a.capAkg,a.cap); return a;
 }
@@ -2043,7 +2269,8 @@ async function vDashboard(m){
         <div class="meta">${a.adq===null&&a.pending?'awaiting actuals · ':''}${mt(w.reduce((s,x)=>s+x.wt,0))} MT WIP · ${d} delayed</div></div>`; }).join('')}</div>
     <div class="kpis" style="margin-top:14px">
       <div class="kpi"><div class="v num">${fmt(A.pq)}</div><div class="l">Planned qty · ${mt(A.pkg)} MT</div></div>
-      <div class="kpi"><div class="v num">${fmt(A.aq)}</div><div class="l">Actual qty · ${mt(A.akg)} MT</div></div>
+      <div class="kpi"><div class="v num">${fmt(A.aq)}</div><div class="l">Actual qty · ${mt(A.akg)} MT (all booked)</div></div>
+      <div class="kpi"><div class="v num">${mt(A.offkg)}</div><div class="l">MT from other planned days / unplanned · ${fmt(A.offq)} pcs</div></div>
       <div class="kpi ${A.sq?'bad':''}"><div class="v num">${fmt(A.sq)}</div><div class="l">Shortfall qty · ${mt(A.skg)} MT</div></div>
       <div class="kpi ${ragClass(A.adq)}"><div class="v num">${pctTxt(A.adq)}</div><div class="l">Plan adherence (qty)${A.pending?' · '+A.pending+' plan(s) awaiting actuals':''}</div></div>
       <div class="kpi ${ragClass(A.adw)}"><div class="v num">${pctTxt(A.adw)}</div><div class="l">Weight adherence</div></div>
@@ -2055,7 +2282,7 @@ async function vDashboard(m){
     <div class="tbl-wrap"><table><thead><tr><th>Process</th><th class="r">Plan qty</th><th class="r">Actual qty</th><th class="r">Shortfall</th><th class="r">Adherence %</th><th class="r">Plan MT</th><th class="r">Actual MT</th><th class="r">Weight adh. %</th><th class="r">Capacity util.</th><th class="r">Delayed WIP</th><th class="r">CF qty</th></tr></thead><tbody>
     ${sortedProcs().filter(p=>p.active).map(p=>{ const a=agg(from,to,p.id); const d=wipFor(p.id).filter(w=>w.delay.status==='Delayed').length; const c=S.cfOpen.filter(x=>x.processId===p.id).reduce((s,x)=>s+x.qty,0);
       return `<tr><td>${esc(p.id+' · '+p.name)}${p.type==='HT'?' <span class="chip heat">HT</span>':''}</td><td class="r num">${fmt(a.pq)}</td><td class="r num">${fmt(a.aq)}</td><td class="r num">${fmt(a.sq)}</td><td class="r">${a.adq===null&&a.pending?'<span class="chip mute">Awaiting actuals</span>':`<span class="chip ${ragClass(a.adq)}">${pctTxt(a.adq)}</span>`}</td><td class="r num">${mt(a.pkg)}</td><td class="r num">${mt(a.akg)}</td><td class="r"><span class="chip ${ragClass(a.adw)}">${pctTxt(a.adw)}</span></td><td class="r num">${pctTxt(a.util)}</td><td class="r num">${d}</td><td class="r num">${fmt(c)}</td></tr>`; }).join('')}</tbody></table></div>
-    <div class="small muted" style="margin-top:6px">Adherence counts plan days whose actuals are submitted or which are already over. Green ≥ 100% · Amber 90 to under 100% · Red under 90%. HT capacity utilisation is shown on the HT dashboard (furnace hours).</div>
+    <div class="small muted" style="margin-top:6px">Actual = everything booked in the period (incl. castings planned for other days). Adherence = planned lines done by their plan day, counted for plan days whose actuals are submitted or which are over. Green ≥ 100% · Amber 90 to under 100% · Red under 90%. HT capacity utilisation is shown on the HT dashboard (furnace hours).</div>
     <div class="grid g2" style="margin-top:18px">
       ${['Daily plan vs actual (30 days)','Weekly plan adherence','Monthly plan adherence','Yearly plan adherence','Process-wise weekly adherence','Shortfall trend (30 days)','Delayed WIP trend','Shortfall reasons (Pareto)'].map((t,i)=>`<div class="panel"><h3>${t}</h3><div class="chart-box"><canvas id="c${i}"></canvas></div></div>`).join('')}</div>`;
   m.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{ S.ui.dKind=b.dataset.k; go('dashboard'); });
