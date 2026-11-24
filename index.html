@@ -669,7 +669,7 @@ async function boot(){
     if(Store.mode!=='firebase'){ bootMsg('Loading settings…'); await withTimeout(loadConfig(), 30000, 'reading the settings file (config.json)'); } else S.cfg=S.cfg||defaultConfig(); }
   catch(e){ console.error(e); return showStartError(e); }
   if(Store.mode==='firebase'){
-    Store.auth.onAuthStateChanged(fu=>{ if(fu && !S.busySetup) afterFbSignIn(fu); else if(!fu){ S.busySetup=false; const m=S.loginMsg; S.loginMsg=null; showLogin(m); } });
+    Store.auth.onAuthStateChanged(fu=>{ if(fu && !S.busySetup) afterFbSignIn(fu); else if(!fu){ S.busySetup=false; const m=S.loginMsg; clearTimeout(S.lmT); S.lmT=setTimeout(()=>{ S.loginMsg=null; },2000); showLogin(m, m?{u:($('#lu')||{}).value||''}:null); } });
     return;
   }
   const sess=sessionStorage.getItem('wipUser');
@@ -677,7 +677,7 @@ async function boot(){
   if(u){ S.user=u; startApp(); } else showLogin();
 }
 const bootMsg=t=>{ const r=$('#root'); r.innerHTML=`<div class="login"><div class="panel" style="max-width:460px;text-align:center"><div class="glow" style="margin-bottom:12px"></div><b>${esc(t)}</b><div class="small muted" style="margin-top:6px">${Store.dir?'Data folder: '+esc(Store.dir.name):''}</div></div></div>`; };
-function withTimeout(p, ms, what){ return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('No answer from the network folder while '+what+' (waited '+Math.round(ms/1000)+' s).')),ms))]); }
+function withTimeout(p, ms, what){ return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('No answer while '+what+' (waited '+Math.round(ms/1000)+' s).')),ms))]); }
 /* checks read / write / delete on the shared folder once per session and tells the user exactly which step fails */
 async function folderSelfTest(){
   const d=Store.dir; const name='_connection_test_'+Store.me+'.json';
@@ -757,28 +757,30 @@ function showLogin(msg, keep){
     ${msg?`<div class="banner bad">${esc(msg)}</div>`:''}
     <label class="field">User name<input id="lu" required autocapitalize="off" value="${esc((keep&&keep.u)||'')}" placeholder="e.g. ajay"></label>
     <label class="field">${fb?'Password (at least 6 characters)':'PIN'}<input id="lp" type="password" ${fb?'':'inputmode="numeric"'} required value="${esc((keep&&keep.p)||'')}"></label>
-    <button class="btn" type="submit">Sign in</button>
-    ${fb?'<button class="btn ghost sm" type="button" id="lsetup">First-time setup: create the administrator</button>':''}
+    <button class="btn" type="submit" id="lsubmit">Sign in</button>
+    ${fb?`<div class="small muted">First use: the very first sign-in creates the administrator. Suggested: user name <b>admin</b>, password <b>${DEFAULT_ADMIN_PW}</b> – change it after login in Masters › Users.</div>`:''}
     ${Store.mode==='folder'?`<div class="small muted">Data folder: <b>${esc(Store.dir.name)}</b> · <a href="#" id="lchg">change</a></div>`:''}
     ${!fb && S.cfg.users.some(u=>u.demo)?'<div class="small muted">Trial accounts: admin, mgmt, ht, ko – PIN 1234. The administrator should change or remove them before go-live.</div>':''}
   </form></div>`;
   $('#lf').onsubmit=async e=>{ e.preventDefault();
     const un=normUser($('#lu').value), pin=$('#lp').value;
     if(fb){
-      try{ await Store.auth.signInWithEmailAndPassword(un+'@'+LOGIN_DOMAIN, pin); }
-      catch(err){ showLogin(/api-key/i.test(err.code||err.message)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.':/operation-not-allowed/i.test(err.code||'')?'Email/Password sign-in is not enabled in Firebase (Authentication › Sign-in method).':/password|credential|user-not-found|invalid/i.test(err.code||err.message)?'User name or password is not correct. If no administrator exists yet, click “First-time setup” instead of Sign in. [code: '+(err.code||'?')+']':'Sign-in failed: '+(err.code||err.message), {u:$('#lu').value}); }
+      try{ await Store.auth.signInWithEmailAndPassword(un+'@'+LOGIN_DOMAIN, pin); if(pin===DEFAULT_ADMIN_PW) sessionStorage.setItem('ppDefaultPw','1'); }
+      catch(err){
+        if(/invalid-credential|invalid-login|user-not-found|wrong-password/i.test(err.code||'')) return fbFirstSetup(true);   // maybe the very first login
+        showLogin(/api-key/i.test(err.code||err.message)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.':/operation-not-allowed/i.test(err.code||'')?'Email/Password sign-in is not enabled in Firebase (Authentication › Sign-in method).':/password|credential|user-not-found|invalid/i.test(err.code||err.message)?'User name or password is not correct. [code: '+(err.code||'?')+']':'Sign-in failed: '+(err.code||err.message), {u:$('#lu').value}); }
       return;
     }
     const u=S.cfg.users.find(x=>x.username.toLowerCase()===un);
     if(!u || u.pin!==pinHash(un,pin)) return showLogin('User name or PIN is not correct.');
     S.user=u; sessionStorage.setItem('wipUser',u.username); startApp();
   };
-  if($('#lsetup')) $('#lsetup').onclick=()=>fbFirstSetup();
   if($('#lchg')) $('#lchg').onclick=async e=>{ e.preventDefault(); await HandleDB.del('dataDir'); Store.dir=null; Store.pending=null; showConnectFolder(); };
 }
 /* ---------- Firebase sign-in, first administrator and user accounts ---------- */
 async function getAccess(){ const d=await Store.db.collection(COLLECTION).doc('access').get(); return d.exists?d.data():null; }
 async function afterFbSignIn(fu){
+  if(!Store.auth.currentUser || Store.auth.currentUser.uid!==fu.uid) return;   // stale event (account was just removed)
   try{
     const acc=await getAccess();
     const role=acc && acc.uids && acc.uids[fu.uid];
@@ -788,27 +790,49 @@ async function afterFbSignIn(fu){
     S.user={...rec, role}; startApp();
   }catch(e){ console.error(e); S.loginMsg='Could not open the database: '+e.message+'. Check the Firestore security rules.'; await Store.auth.signOut(); }
 }
-async function fbFirstSetup(){
-  const raw=$('#lu').value, un=normUser(raw), pw=$('#lp').value, keep={u:raw,p:pw};
-  if(!un) return showLogin('First type a user name (e.g. ajay) and a password in the boxes above, then click First-time setup.', keep);
-  if(!/^[a-z0-9._-]{3,30}$/.test(un)) return showLogin('User name “'+raw+'” is not allowed. Use 3–30 letters or digits, e.g. ajay or ajay.kumar (no @ or special characters).', keep);
-  if(pw.length<6) return showLogin('The password must have at least 6 characters (you typed '+pw.length+').', keep);
-  S.busySetup=true;
+const DEFAULT_ADMIN_PW='Admin@123';
+async function fbFirstSetup(auto){
+  const raw=$('#lu').value, un=normUser(raw), pw=$('#lp').value, keep={u:raw,p:''};
+  const wrong=()=>showLogin('User name or password is not correct.', {u:raw});
+  if(!un) return showLogin('Type a user name and a password.', keep);
+  if(!/^[a-z0-9._-]{3,30}$/.test(un)) return auto?wrong():showLogin('User name “'+raw+'” is not allowed. Use 3–30 letters or digits, e.g. admin or ajay.kumar.', keep);
+  if(pw.length<6) return auto?wrong():showLogin('The password must have at least 6 characters.', keep);
+  const btn=$('#lsubmit'); btn.disabled=true;
+  const step=t=>{ btn.textContent=t; };
+  S.busySetup=true; const email=un+'@'+LOGIN_DOMAIN; let user=null;
   try{
-    const cred=await Store.auth.createUserWithEmailAndPassword(un+'@'+LOGIN_DOMAIN, pw);
-    if(await getAccess()){ S.loginMsg='This system is already set up. Sign in, or ask the administrator for an account.'; await cred.user.delete(); return; }
-    await Store.db.collection(COLLECTION).doc('access').set({uids:{[cred.user.uid]:'Admin'}});
-    const cfg=defaultConfig(); cfg.users=[{id:uidGen('U'), uid:cred.user.uid, name:'Administrator', username:un, role:'Admin', processes:[]}];
-    await Store.set('config', cfg);
-    S.busySetup=false; await afterFbSignIn(cred.user);
+    step('1/4 Creating the login account…');
+    try{ user=(await withTimeout(Store.auth.createUserWithEmailAndPassword(email,pw),20000,'creating the login account')).user; }
+    catch(e){
+      if(e.code!=='auth/email-already-in-use') throw e;
+      if(auto){ S.busySetup=false; return wrong(); }        // existing account + wrong password
+      step('1/4 Account exists – signing in…');
+      try{ user=(await withTimeout(Store.auth.signInWithEmailAndPassword(email,pw),20000,'signing in')).user; }
+      catch(e2){ const x=new Error('User name “'+un+'” already exists with a different password.'); x.code='exists'; throw x; }
+    }
+    step('2/4 Checking the database…');
+    const acc=await withTimeout(getAccess(),20000,'reading the Firestore database');
+    if(acc && acc.uids && !acc.uids[user.uid]){            // system already set up: this was simply a wrong login
+      S.loginMsg='User name or password is not correct.'; await user.delete().catch(()=>{}); S.busySetup=false; await Store.auth.signOut().catch(()=>{}); return; }
+    if(acc && acc.uids && acc.uids[user.uid]){ S.busySetup=false; return afterFbSignIn(user); }
+    if(!acc){ step('3/4 Registering you as administrator…'); await withTimeout(Store.db.collection(COLLECTION).doc('access').set({uids:{[user.uid]:'Admin'}}),20000,'writing to the Firestore database'); }
+    if(!(await withTimeout(Store.get('config'),20000,'reading the settings'))){
+      step('4/4 Creating the settings…');
+      const cfg=defaultConfig(); cfg.users=[{id:uidGen('U'), uid:user.uid, name:raw.trim()||'Administrator', username:un, role:'Admin', processes:[]}];
+      await withTimeout(Store.set('config', cfg),20000,'writing the settings');
+    }
+    if(pw===DEFAULT_ADMIN_PW) sessionStorage.setItem('ppDefaultPw','1');
+    S.busySetup=false; await afterFbSignIn(user);
     await audit('First-time setup', 'Administrator '+un+' created');
-  }catch(e){ S.busySetup=false; const c=e.code||'';
-    showLogin(c==='auth/email-already-in-use'?'User name “'+un+'” already exists in Firebase. Sign in with the password used when it was created – or delete it in Firebase › Authentication › Users and run First-time setup again. (If sign-in then says “not authorised”, delete the user in Firebase › Authentication › Users and run First-time setup again.)'
+  }catch(e){ S.busySetup=false; console.error(e); const c=e.code||'';
+    showLogin(c==='exists'?'User name or password is not correct.'
       :/operation-not-allowed/.test(c)?'Email/Password sign-in is not enabled. Firebase › Authentication › Sign-in method › Email/Password › Enable, then try again.'
+      :/admin-restricted/.test(c)?'Creating accounts is switched off. Firebase › Authentication › Settings › User actions › tick “Enable create (sign-up)” › Save, then try again.'
       :/api-key/.test(c)?'Firebase API key in index.html is not valid – copy it again from the Firebase console.'
-      :/permission|insufficient/i.test(c+' '+e.message)?'The database refused access. Firebase › Firestore › Rules: paste firestore.rules and Publish. Then delete the half-created user (Authentication › Users) and try again.'
+      :/permission|insufficient/i.test(c+' '+e.message)?'The database refused access. Firebase › Firestore › Rules: paste firestore.rules and Publish, then click First-time setup again with the same user name and password.'
       :/unauthorized-domain/.test(c)?'This web address is not allowed. Firebase › Authentication › Settings › Authorized domains › add your github.io address.'
-      :'Setup failed: '+(c?c+' – ':'')+e.message, keep); console.error(e); }
+      :/No answer|offline|unavailable|not-found|NOT_FOUND/i.test(c+' '+e.message)?'The Firestore database did not answer ('+(c||e.message)+'). Check: Firebase › Firestore Database is created (Standard edition, database “(default)”), then click First-time setup again with the same user name and password.'
+      :'Setup failed: '+(c?c+' – ':'')+e.message, keep); }
 }
 let secondaryApp=null;
 async function fbCreateAccount(username, pw){          // a second Firebase app instance keeps the administrator signed in
@@ -842,7 +866,7 @@ async function startApp(){
       <br><span>${Store.mode==='local'?'Trial mode (this browser)':Store.mode==='folder'?'Data folder: '+esc(Store.dir.name):'Shared database'}</span><br><button id="lref">Refresh data</button> <button id="lo">Sign out</button></div></nav>
     <main id="main"></main></div>`;
   $('#lref').onclick=async()=>{ S.loadedAt=0; go(S.view); };
-  $('#lo').onclick=async()=>{ sessionStorage.removeItem('wipUser'); S.user=null; if(Store.mode==='firebase') await Store.auth.signOut(); else showLogin(); };
+  $('#lo').onclick=async()=>{ sessionStorage.removeItem('wipUser'); sessionStorage.removeItem('ppDefaultPw'); S.user=null; if(Store.mode==='firebase') await Store.auth.signOut(); else showLogin(); };
   renderNav(); go(S.view);
 }
 function renderNav(){
@@ -862,6 +886,7 @@ function setupBanners(){
   const out=[];
   if(Store.mode==='local') out.push('<div class="banner info">Trial mode: data is stored in this browser only. For shop-floor users on several PCs, set DATA_STORAGE to \'folder\' or add the Firebase configuration at the top of index.html.</div>');
   if(S.user.role==='Admin'){
+    if(Store.mode==='firebase' && sessionStorage.getItem('ppDefaultPw')) out.push('<div class="banner bad">You are using the default password '+DEFAULT_ADMIN_PW+'. Change it now: Masters › Users › your row › New PIN / password › Save users.</div>');
     if(Store.mode!=='firebase' && S.cfg.users.some(u=>u.demo)) out.push('<div class="banner warn">Trial accounts with PIN 1234 are still active. Change or delete them in Masters › Users before go-live.</div>');
     const noLT=sortedProcs().filter(p=>p.active && !S.cfg.leadTimes.some(l=>l.processId===p.id && l.status!=='Inactive' && !l.metallurgy && !l.part));
     if(noLT.length) out.push(`<div class="banner warn">No approved lead time for ${noLT.map(p=>esc(p.id+' '+p.name)).join(', ')}. Delay status shows “LT not set” for them until you enter a stage lead time in Masters › Lead times.</div>`);
@@ -2058,7 +2083,7 @@ async function saveUsers(rows){
     const x={...u}; x.username=normUser(x.username);
     if(!x.uid){ try{ x.uid=await fbCreateAccount(x.username, x.__pin); }
       catch(e){ throw new Error('Could not create '+x.username+': '+(e.code==='auth/email-already-in-use'?'that user name already has an account (it may belong to a deleted user – choose another name).':e.message)); } }
-    else if(x.__pin && x.username===S.user.username){ try{ await Store.auth.currentUser.updatePassword(x.__pin); }catch(e){ throw new Error('Password not changed: '+(e.code==='auth/requires-recent-login'?'sign out, sign in again and retry.':e.message)); } }
+    else if(x.__pin && x.username===S.user.username){ try{ await Store.auth.currentUser.updatePassword(x.__pin); sessionStorage.removeItem('ppDefaultPw'); }catch(e){ throw new Error('Password not changed: '+(e.code==='auth/requires-recent-login'?'sign out, sign in again and retry.':e.message)); } }
     delete x.__pin; delete x.pinNew; delete x.pin; delete x.demo; out.push(x);
   }
   const uids={}; out.forEach(u=>{ uids[u.uid]=u.role; });
