@@ -840,6 +840,11 @@ async function fbCreateAccount(username, pw){          // a second Firebase app 
   const cred=await secondaryApp.auth().createUserWithEmailAndPassword(username+'@'+LOGIN_DOMAIN, pw);
   const uid=cred.user.uid; await secondaryApp.auth().signOut(); return uid;
 }
+async function fbAdoptAccount(username, pw){
+  if(!secondaryApp) secondaryApp=firebase.initializeApp(FIREBASE_CONFIG,'userAdmin');
+  const cred=await secondaryApp.auth().signInWithEmailAndPassword(username+'@'+LOGIN_DOMAIN, pw);
+  const uid=cred.user.uid; await secondaryApp.auth().signOut(); return uid;
+}
 async function setAccess(uids){ await Store.db.collection(COLLECTION).doc('access').set({uids}); }
 const NAV=[
   {id:'dashboard', label:'Management dashboard', roles:['Admin','Management']},
@@ -2028,7 +2033,8 @@ function editorTable(id, cols, rows){
     if(c.t==='num') return `<input type="number" step="any" ${a} value="${v??''}" style="width:${c.w||90}px">`;
     if(c.t==='date') return `<input type="date" ${a} value="${v||''}">`;
     if(c.t==='dt') return `<input type="datetime-local" ${a} value="${dtLocalVal(v)}">`;
-    if(c.t==='pw') return `<input type="password" ${a} placeholder="${(Store.mode==='firebase'?r.uid:r.pin)?'unchanged':(Store.mode==='firebase'?'set password':'set PIN')}" style="width:110px">`;
+    if(c.t==='pw'){ if(r.username && S.user && r.username===S.user.username) return `<input type="password" ${a} disabled placeholder="use Change password" autocomplete="off" style="width:150px">`;
+      return `<input type="password" ${a} autocomplete="new-password" placeholder="${(Store.mode==='firebase'?r.uid:r.pin)?'unchanged':(Store.mode==='firebase'?'set password':'set PIN')}" style="width:150px">`; }
     return `<input ${a} value="${esc(c.f?c.f(r):v??'')}" style="width:${c.w||140}px">`; };
   return `<div class="tbl-wrap"><table id="${id}"><thead><tr>${cols.map(c=>`<th title="${esc(c.h||'')}">${esc(c.l)}</th>`).join('')}<th></th></tr></thead><tbody>
     ${rows.map((r,i)=>`<tr>${cols.map(c=>`<td>${cell(c,r,i)}</td>`).join('')}<td><button class="btn danger sm" data-del="${i}">Delete</button></td></tr>`).join('')}</tbody></table></div>`;
@@ -2062,9 +2068,9 @@ const MASTERS={
     blank:()=>({id:'F'+(S.cfg.furnaces.length+1),name:'Furnace '+(S.cfg.furnaces.length+1),capacityKg:2500,size:'',status:'Available',availableFrom:'',turnaroundH:0})},
   'Holidays':{key:'holidays', help:'Plant holidays are skipped by every non-HT process when planning and when carrying shortfall to the next working day.',
     cols:[{k:'date',l:'Date',t:'date'},{k:'name',l:'Holiday',w:220}], blank:()=>({date:'',name:''})},
-  'Users':{key:'users', help:'Department users see only the processes listed (comma-separated IDs, e.g. 1090,1095). HT users manage the HT process. Management is read-only. In the shared (Firebase) version each person signs in with user name + password (at least 6 characters); deleting a row removes that person\'s access at once.',
+  'Users':{key:'users', help:'Department users see only the processes listed – type IDs or names, comma-separated (e.g. 1060 or Knock Out; 1090,1095). HT users manage the HT process. Management is read-only. In the shared (Firebase) version each person signs in with user name + password (at least 6 characters); deleting a row removes that person\'s access at once.',
     cols:[{k:'name',l:'Name',w:160},{k:'username',l:'User name',w:110},{k:'role',l:'Role',t:'sel',o:['Admin','Department User','HT User','Management']},
-      {k:'processes',l:'Processes',w:120,f:r=>(r.processes||[]).join(','),p:(r,v)=>{ r.processes=v.split(',').map(x=>x.trim()).filter(Boolean); }},{k:'pinNew',l:'New PIN / password',t:'pw',h:'Firebase mode: at least 6 characters'}],
+      {k:'processes',l:'Processes (IDs)',w:140,f:r=>(r.processes||[]).map(id=>id+' '+(procName(id)||'')).join(', '),p:(r,v)=>{ r.processes=v.split(',').map(x=>x.trim().split(/\s+/)[0]).filter(Boolean); }},{k:'pinNew',l:'New PIN / password',t:'pw',h:'Firebase mode: at least 6 characters'}],
     blank:()=>({id:uidGen('U'),name:'',username:'',role:'Department User',processes:[],pin:''})}
 };
 function vMasters(m){
@@ -2108,7 +2114,10 @@ async function saveUsers(rows){
   for(const u of rows){
     const x={...u}; x.username=normUser(x.username);
     if(!x.uid){ try{ x.uid=await fbCreateAccount(x.username, x.__pin); }
-      catch(e){ throw new Error('Could not create '+x.username+': '+(e.code==='auth/email-already-in-use'?'that user name already has an account (it may belong to a deleted user – choose another name).':e.message)); } }
+      catch(e){
+        if(e.code!=='auth/email-already-in-use') throw new Error('Could not create '+x.username+': '+(e.code||e.message));
+        try{ x.uid=await fbAdoptAccount(x.username, x.__pin); }       // left over from an earlier save: same password → reuse it
+        catch(e2){ throw new Error('User name “'+x.username+'” already has a Firebase account with a different password. Type the password used last time, or delete '+x.username+'@prodplan.local in Firebase › Authentication › Users, or choose another user name.'); } } }
     else if(x.__pin && x.username===S.user.username){ throw new Error('To change your own password use the “Change password” button at the bottom-left (it asks for your current password first).'); }
     delete x.__pin; delete x.pinNew; delete x.pin; delete x.demo; out.push(x);
   }
@@ -2126,7 +2135,16 @@ function validateMaster(tab, rows){
     for(const r of rows){ const st=routeSteps(r); if(!r.name) return 'Every routing rule needs a name.'; if(st.length<1) return 'Rule '+r.name+' has no stages.';
       const bad=st.filter(x=>!ids.has(x)); if(bad.length) return 'Rule '+r.name+': unknown process ID '+bad.join(', ')+'.'; if(new Set(st).size!==st.length) return 'Rule '+r.name+' lists a stage twice.'; } }
   if(tab==='Furnaces'){ if(rows.some(r=>!r.id||!(+r.capacityKg>0))) return 'Every furnace needs an ID and a capacity.'; }
-  if(tab==='Users'){ rows.forEach(r=>{ r.username=normUser(r.username); }); const un=rows.map(r=>r.username); if(un.some(x=>!x)) return 'Every user needs a user name.'; if(new Set(un).size!==un.length) return 'User names must be unique.';
+  if(tab==='Users'){ rows.forEach(r=>{ r.username=normUser(r.username); });
+    const key=t=>String(t||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    for(const r of rows){ const out=[];
+      for(const t of (r.processes||[])){ if(/^all$/i.test(t)) continue;
+        const p=S.cfg.processes.find(x=>x.id===t) || S.cfg.processes.find(x=>key(x.name)===key(t)) || S.cfg.processes.find(x=>key(x.name).includes(key(t)) || key(x.id+x.name).includes(key(t)));
+        if(!p) return 'User '+(r.name||r.username)+': process “'+t+'” not found. Use the process ID, e.g. 1060 for Knock Out, 1090,1095 for 1st Fettling.';
+        if(!out.includes(p.id)) out.push(p.id); }
+      r.processes=out;
+      if((r.role==='Department User'||r.role==='HT User') && !out.length) return 'User '+(r.name||r.username)+' needs at least one process (e.g. 1060).'; }
+    const un=rows.map(r=>r.username); if(un.some(x=>!x)) return 'Every user needs a user name.'; if(new Set(un).size!==un.length) return 'User names must be unique.';
     if(!rows.some(r=>r.role==='Admin')) return 'Keep at least one Admin.';
     if(rows.some(r=>!/^[a-z0-9._-]{2,30}$/i.test(r.username))) return 'User names may use letters, digits, dot, dash and underscore only (no spaces).';
     if(Store.mode==='firebase'){ if(rows.some(r=>!r.uid && !(r.__pin && r.__pin.length>=6))) return 'Set a password of at least 6 characters for every new user.';
