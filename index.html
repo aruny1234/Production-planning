@@ -168,6 +168,34 @@ td.wrap{white-space:normal;min-width:180px;max-width:280px}
 .notif:hover{background:rgba(255,255,255,.08)}
 .nbadge{margin-left:auto;background:var(--warn);color:#fff;border-radius:999px;padding:0 7px;font-size:12px;font-weight:600}
 .nbadge.bad{background:var(--bad)}
+.navh{color:rgba(255,255,255,.55);font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:10px 18px 4px}
+.dhead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:-4px 0 10px}
+
+/* ---- dashboard deck cards ---- */
+.deck{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:12px}
+.deck.small4{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.dcard{--rag:#8A96A3;background:var(--surface,#fff);border:1px solid var(--line);border-radius:14px;padding:14px 16px;position:relative;overflow:hidden;box-shadow:0 1px 2px rgba(20,30,40,.05)}
+.dcard::before{content:"";position:absolute;inset:0 0 auto 0;height:5px;background:var(--rag)}
+.dcard.ok{--rag:#2D7A4C}.dcard.warn{--rag:#C28100}.dcard.bad{--rag:#B8322A}.dcard.info{--rag:#3E6283}.dcard.mute{--rag:#8A96A3}
+.dcard .dl{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:2px}
+.dcard .dv{font-size:26px;font-weight:700;color:var(--rag);margin-top:6px;line-height:1.1}
+.dcard.info .dv,.dcard.mute .dv{color:var(--ink,#1C2733)}
+.dcard.big .dv{font-size:36px}
+.dcard .dv small{font-size:14px;font-weight:500;color:var(--muted)}
+.dcard .ds{font-size:12px;color:var(--muted);margin-top:4px}
+.dbar{height:7px;border-radius:99px;background:#E7ECF1;margin-top:10px;overflow:hidden}.dbar i{display:block;height:100%;background:var(--rag);border-radius:99px}
+.pdeck{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.pcard{--rag:#8A96A3;background:var(--surface,#fff);border:1px solid var(--line);border-left:6px solid var(--rag);border-radius:12px;padding:12px 14px;cursor:pointer;transition:transform .12s, box-shadow .12s}
+.pcard:hover,.pcard:focus{transform:translateY(-2px);box-shadow:0 6px 16px rgba(20,30,40,.10);outline:none}
+.pcard.ok{--rag:#2D7A4C}.pcard.warn{--rag:#C28100}.pcard.bad{--rag:#B8322A}
+.pcard .ph{display:flex;gap:8px;align-items:center}.pcard .ph .code{font-size:11px;background:#EEF2F6;border-radius:6px;padding:1px 6px;color:var(--muted)}
+.pcard .pv{font-size:30px;font-weight:700;margin-top:6px;line-height:1}
+.pbar{height:8px;border-radius:99px;background:#E7ECF1;margin:8px 0;overflow:hidden}.pbar i{display:block;height:100%;border-radius:99px}
+.pst{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;font-size:12px;color:var(--muted)}.pst b{color:var(--ink,#1C2733)}
+.spark{width:100%!important;height:38px!important;margin-top:6px}
+.ch{position:relative;height:260px}
+.legend{white-space:nowrap}.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin:0 3px 0 8px;vertical-align:-1px}.legend i.ok{background:#2D7A4C}.legend i.warn{background:#C28100}.legend i.bad{background:#B8322A}
+tr.rowbad td{color:#B8322A}tr.rowbad{background:#FDF2F1}tr.rowbad td:first-child{box-shadow:inset 4px 0 0 #B8322A}
 
 </style>
 <script src="lib/chart.umd.min.js"></script>
@@ -581,7 +609,9 @@ const fmt=(n,d=0)=>n===null||n===undefined||isNaN(n)?'–':Number(n).toLocaleStr
 const mt=kg=>fmt((kg||0)/1000,2);
 const pct=(a,b)=>b>0?(100*a/b):null;
 const pctTxt=v=>v===null||v===undefined?'–':fmt(v,1)+'%';
-const ragClass=v=>v===null?'mute':v>=100?'ok':v>=90?'warn':'bad';
+const ragG=()=>+((S.cfg&&S.cfg.settings&&S.cfg.settings.ragGreen)||90), ragA=()=>+((S.cfg&&S.cfg.settings&&S.cfg.settings.ragAmber)||75);
+const ragClass=v=>v===null||v===undefined||isNaN(v)?'mute':v>=ragG()?'ok':v>=ragA()?'warn':'bad';
+const ragColor=v=>({ok:'#2D7A4C',warn:'#C28100',bad:'#B8322A',mute:'#8A96A3'})[ragClass(v)];
 const fdate=iso=>{ if(!iso) return '–'; const [y,m,d]=iso.slice(0,10).split('-'); return d+'-'+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+'-'+y.slice(2); };
 const fdt=dt=>{ if(!dt) return '–'; const d=new Date(dt); return fdate(localISO(d))+' '+pad(d.getHours())+':'+pad(d.getMinutes()); };
 const localISO=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
@@ -592,7 +622,16 @@ const procName=id=>{ const p=procById(id); return p?p.name:id; };
 const sortedProcs=()=>[...S.cfg.processes].sort((a,b)=>(a.seq||99)-(b.seq||99));
 const htProc=()=>S.cfg.processes.find(p=>p.type==='HT');
 const isRole=(...r)=>S.user && r.includes(S.user.role);
-const canSeeProc=id=>isRole('Admin','Management') || (S.user.processes||[]).includes(id);
+const canSeeProc=id=>(!S.deptCtx || S.deptCtx.pids.includes(id)) && (isRole('Admin','Management') || (S.user.processes||[]).includes(id));
+const DEFAULT_DEPTS=()=>[
+  {id:'KO', name:'Knock Out & RR Cutting', processes:['1060','1070']},
+  {id:'HT', name:'Heat Treatment', processes:['1080']},
+  {id:'F1', name:'1st Fettling', processes:['1090','1095']},
+  {id:'RM', name:'Rough Machining', processes:['1110']},
+  {id:'FF', name:'Finish Fettling', processes:['1145','1150']} ];
+const deptList=()=>S.cfg.departments||[];
+const deptById=id=>deptList().find(d=>d.id===id);
+const myDepts=()=>deptList().filter(d=>isRole('Admin','Management') || d.processes.some(p=>(S.user.processes||[]).includes(p)));
 const ym=iso=>iso.slice(0,7);
 function toast(msg,bad){ document.querySelectorAll('.toast').forEach(x=>x.remove()); const t=document.createElement('div'); t.className='toast'+(bad?' bad':''); t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(), bad?6000:3200); }
 async function audit(action, detail){
@@ -606,9 +645,9 @@ function csv(name, rows){
 
 /* ===================== LOAD & DERIVE ===================== */
 async function loadConfig(){ S.cfg=await Store.get('config'); if(!S.cfg){ S.cfg=defaultConfig(); await Store.set('config',S.cfg); }
-  if(!S.cfg.routes) S.cfg.routes=defaultRoutes(); S.cfg.settings.wipMode=S.cfg.settings.wipMode||'Synchro snapshot'; S.cfg.settings.entryStages=S.cfg.settings.entryStages||'1060'; }
+  if(!S.cfg.routes) S.cfg.routes=defaultRoutes(); if(!S.cfg.departments) S.cfg.departments=DEFAULT_DEPTS(); S.cfg.settings.wipMode=S.cfg.settings.wipMode||'Synchro snapshot'; S.cfg.settings.entryStages=S.cfg.settings.entryStages||'1060'; }
 async function saveConfig(mut, what){
-  S.cfg=await Store.update('config', c=>{ c=c||defaultConfig(); mut(c); return c; });
+  S.cfg=await Store.update('config', c=>{ c=c||defaultConfig(); if(!c.departments) c.departments=DEFAULT_DEPTS(); if(!c.routes) c.routes=defaultRoutes(); mut(c); return c; });
   if(what) await audit('Master change', what);
 }
 async function loadAll(){
@@ -862,15 +901,12 @@ async function fbAdoptAccount(username, pw){
 async function setAccess(uids){ await Store.db.collection(COLLECTION).doc('access').set({uids}); }
 const NAV=[
   {id:'dashboard', label:'Management dashboard', roles:['Admin','Management']},
-  {id:'wip', label:'WIP status', roles:['Admin','Management','Department User','HT User']},
-  {id:'plan', label:'Daily plan', roles:['Admin','Management','Department User','HT User']},
-  {id:'exec', label:'Execution entry', roles:['Admin','Department User']},
-  {sep:true},
-  {id:'ht', label:'HT planning', roles:['Admin','HT User','Management']},
-  {id:'htdash', label:'HT dashboard', roles:['Admin','HT User','Management']},
-  {sep:true},
-  {id:'upload', label:'Upload Synchro WIP', roles:['Admin','Management','Department User','HT User']},
-  {id:'booking', label:'Upload Synchro booking', roles:['Admin','Management','Department User','HT User']},
+  {depts:true},
+  {sep:true, roles:['Admin','Management']},
+  {id:'plan', label:'Publish plan (all)', roles:['Admin','Management']},
+  {id:'wip', label:'WIP status (all)', roles:['Admin','Management']},
+  {id:'upload', label:'Upload Synchro WIP (all)', roles:['Admin','Management']},
+  {id:'booking', label:'Upload Synchro booking (all)', roles:['Admin','Management']},
   {id:'datacheck', label:'Data check (duplicates)', roles:['Admin','Management']},
   {id:'masters', label:'Masters', roles:['Admin']},
   {id:'history', label:'History & audit', roles:['Admin','Management']},
@@ -878,8 +914,9 @@ const NAV=[
 async function startApp(){
   $('#root').innerHTML='<div class="login"><div style="color:#fff">Loading plant data…</div></div>';
   try{ await loadAll(); }catch(e){ console.error(e); toast('Loading failed: '+e.message,true); }
-  const allowed=NAV.filter(n=>!n.sep && n.roles.includes(S.user.role));
-  if(!allowed.some(n=>n.id===S.view)) S.view=allowed[0].id;
+  const allowed=NAV.filter(n=>n.id && n.roles.includes(S.user.role));
+  if(!allowed.some(n=>n.id===S.view) && S.view!=='dept'){ if(allowed.length) S.view=allowed[0].id; else if(myDepts().length){ S.view='dept'; S.ui.deptId=myDepts()[0].id; } }
+  if(S.view==='dept') S.deptCtx=null;
   $('#root').innerHTML=`<div class="shell"><nav class="rail" aria-label="Main">
     <div class="brand"><b>${APP_NAME}</b><span>Day-wise · ${esc(S.cfg.settings.plantName)}</span></div>
     <button class="notif" id="notif" type="button"></button>
@@ -894,15 +931,23 @@ async function startApp(){
   renderNav(); go(S.view);
   if(setupNotices().some(x=>x.level==='bad')) setTimeout(openNotices,400);
 }
+const DEPT_TABS=['overview','wip','plan','exec','ht','htdash','upload','booking'];
 function renderNav(){
-  $('#nav').innerHTML=NAV.filter(n=>n.sep||n.roles.includes(S.user.role)).map(n=>n.sep?'<div class="sep"></div>':`<button data-v="${n.id}" ${n.id===S.view?'aria-current="page"':''}>${esc(n.label)}</button>`).join('');
-  $('#nav').querySelectorAll('button').forEach(b=>b.onclick=()=>go(b.dataset.v));
+  const html=NAV.filter(n=>n.depts || !n.roles || n.roles.includes(S.user.role)).map(n=>{
+    if(n.sep) return '<div class="sep"></div>';
+    if(n.depts){ const ds=myDepts(); return ds.length?`<div class="navh">${isRole('Admin','Management')?'Departments':'My department'}</div>`+ds.map(d=>`<button data-d="${d.id}" ${S.view==='dept'&&S.ui.deptId===d.id?'aria-current="page"':''}>${esc(d.name)}</button>`).join(''):''; }
+    return `<button data-v="${n.id}" ${n.id===S.view?'aria-current="page"':''}>${esc(n.label)}</button>`; }).join('');
+  $('#nav').innerHTML=html;
+  $('#nav').querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>{ S.deptCtx=null; go(b.dataset.v); });
+  $('#nav').querySelectorAll('[data-d]').forEach(b=>b.onclick=()=>{ if(S.ui.deptId!==b.dataset.d){ S.ui.deptTab='overview'; S.ui.execProc=null; } S.ui.deptId=b.dataset.d; S.deptCtx=null; go('dept'); });
 }
 function go(v){
+  if(S.deptCtx && DEPT_TABS.includes(v)){ S.ui.deptTab=v; v='dept'; }       // actions inside a department module stay inside it
   S.view=v; S.charts.forEach(c=>c.destroy()); S.charts=[];
   renderNav(); renderNotifBell(); const m=$('#main'); m.innerHTML='';
   if(Store.mode!=='local' && Date.now()-(S.loadedAt||0)>120000){ m.innerHTML='<div class="empty">Refreshing data…</div>'; loadAll().then(()=>go(v)).catch(e=>toast('Refresh failed: '+e.message,true)); return; }   // other users' entries
-  const fn={dashboard:vDashboard,wip:vWip,plan:vPlan,exec:vExec,ht:vHT,htdash:vHTDash,upload:m=>{ S.ui.upTab='wip'; return vUpload(m); },booking:m=>{ S.ui.upTab='book'; return vUpload(m); },masters:vMasters,history:vHistory,datacheck:vDataCheck}[v];
+  if(v!=='dept') S.deptCtx=null;
+  const fn={dashboard:vDashboard,wip:vWip,plan:vPlan,exec:vExec,ht:vHT,htdash:vHTDash,upload:m=>{ S.ui.upTab='wip'; return vUpload(m); },booking:m=>{ S.ui.upTab='book'; return vUpload(m); },masters:vMasters,history:vHistory,datacheck:vDataCheck,dept:vDept}[v];
   Promise.resolve(fn(m)).catch(e=>{ console.error(e); m.innerHTML+=`<div class="banner bad">This screen hit an error: ${esc(e.message)}</div>`; });
   window.scrollTo(0,0);
 }
@@ -1086,8 +1131,8 @@ async function reverseMoves(date, moves){
 }
 
 /* ===================== UPLOAD SYNCHRO WIP ===================== */
-const canFullUpload=()=>isRole('Admin','Management');
-const myUploadPids=()=>canFullUpload()? S.cfg.processes.map(p=>p.id) : (S.user.processes||[]);
+const canFullUpload=()=>isRole('Admin','Management') && !S.deptCtx;
+const myUploadPids=()=>(isRole('Admin','Management')? S.cfg.processes.map(p=>p.id) : (S.user.processes||[])).filter(id=>!S.deptCtx || S.deptCtx.pids.includes(id));
 const areaFor=pid=>{ const p=procById(pid); return (p&&p.synchroName)||(pid+'-'+(p?p.name:'')); };
 const upTabs=t=>`<div class="tabs"><button data-ut="wip" aria-selected="${t==='wip'}">Upload Synchro WIP</button><button data-ut="book" aria-selected="${t==='book'}">Upload Synchro booking</button></div>`;
 function bindUpTabs(m){ m.querySelectorAll('[data-ut]').forEach(b=>b.onclick=()=>go(b.dataset.ut==='book'?'booking':'upload')); }
@@ -1127,7 +1172,7 @@ function vUpload(m){
       // best sheet: Master WIP for admin/management, the department sheet for department users
       const key=t=>String(t||'').toLowerCase().replace(/[^a-z0-9]/g,'');
       let def=wb.SheetNames.find(n=>/master\s*wip/i.test(n))||wb.SheetNames[0];
-      if(!full){ const nm=mine.map(id=>key(procName(id)).replace(/inhouse|subcontract/g,''));
+      if(!full && !(S.deptCtx && mine.length>1 && wb.SheetNames.some(n=>/master\s*wip/i.test(n)))){ const nm=mine.map(id=>key(procName(id)).replace(/inhouse|subcontract/g,''));
         const hit=wb.SheetNames.find(n=>nm.some(x=>x.includes(key(n))||key(n).includes(x))); if(hit) def=hit; }
       $('#usheet').innerHTML=`<label class="field">Sheet<select id="ush">${wb.SheetNames.map(n=>`<option ${n===def?'selected':''}>${esc(n)}</option>`).join('')}</select></label>
         <label class="field" id="uprocw">Process of this sheet<select id="uproc">${mine.map(id=>`<option value="${id}">${esc(id+' '+procName(id))}</option>`).join('')}</select></label>`;
@@ -1597,14 +1642,14 @@ function planCard(pv, date){
 }
 function planTable(lines, withDay){
   return `<div class="tbl-wrap" style="max-height:420px"><table><thead><tr>${withDay?'<th>Plan day</th>':''}<th>#</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Start</th><th>Agreed</th><th>Job end</th><th>Priority</th><th class="r">Qty</th><th class="r">kg</th><th>Delay</th></tr></thead><tbody>
-    ${lines.map(l=>`<tr>${withDay?`<td>${WD[E.weekdayISO(l.day)]} ${fdate(l.day)}</td>`:''}<td class="num">${l.prio}</td><td>${esc(l.uid)}</td><td>${esc(l.job)}</td><td>${esc(toolOf(l))}</td><td class="wrap">${esc(descOf(l))}</td><td>${esc(l.met)}</td><td>${fdate(l.start)}</td><td>${fdate(l.agreed)}</td><td>${fdate(l.jobEnd)}</td>
+    ${lines.map(l=>`<tr class="${l.delayStatus==='Delayed'||(l.groupLabel||'').startsWith('Delayed')?'rowbad':''}">${withDay?`<td>${WD[E.weekdayISO(l.day)]} ${fdate(l.day)}</td>`:''}<td class="num">${l.prio}</td><td>${esc(l.uid)}</td><td>${esc(l.job)}</td><td>${esc(toolOf(l))}</td><td class="wrap">${esc(descOf(l))}</td><td>${esc(l.met)}</td><td>${fdate(l.start)}</td><td>${fdate(l.agreed)}</td><td>${fdate(l.jobEnd)}</td>
     <td><span class="chip ${l.group===0?'heat':l.group===1?'bad':'mute'}">${esc(l.groupLabel)}</span></td><td class="r num">${fmt(l.qty)}</td><td class="r num">${fmt(l.kg,1)}</td><td>${delayChip(l.delayStatus,l.delayDays)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function delayChip(st,days){ if(!st) return ''; const c={'Delayed':'Delayed','Due soon':'Due','On track':'On','LT not set':'LT'}[st]||'mute'; return `<span class="chip ${c}">${esc(st)}${st==='Delayed'&&days?' '+days+' d':''}</span>`; }
 
 async function publishPlan(start, prev){
   const btn=$('#pub'); btn.disabled=true; btn.textContent='Publishing…';
-  try{ const days=await publishCore(start, prev);
+  try{ const days=await publishCore(start, prev, S.deptCtx?S.deptCtx.pids:undefined);
     toast('Day-wise plan published: '+days.length+' day(s), '+(days.length?fdate(days[0])+' to '+fdate(days[days.length-1]):'')+'.'); S.ui.planMode='published'; go('plan');
   }catch(e){ console.error(e); toast('Publishing failed: '+e.message,true); btn.disabled=false; }
 }
@@ -2292,80 +2337,93 @@ function agg(from,to,pid){
     Object.entries(s.reasons||{}).forEach(([r,x])=>{ const t=a.reasons[r]=a.reasons[r]||{q:0,kg:0}; t.q+=x.q; t.kg+=x.kg; }); }); });
   a.adq=pct(a.aqC,a.pqC); a.adw=pct(a.akgC,a.pkgC); a.util=pct(a.capAkg,a.cap); return a;
 }
+/* deck-card helpers */
+const dcard=(label,value,sub,rag,barPct,big)=>`<div class="dcard ${rag||''} ${big?'big':''}"><div class="dl">${label}</div><div class="dv num">${value}</div>${sub?`<div class="ds">${sub}</div>`:''}${barPct!==undefined&&barPct!==null?`<div class="dbar"><i style="width:${Math.max(0,Math.min(100,barPct))}%"></i></div>`:''}</div>`;
+function chartDays(kind,from,to,anchor){ if((kind==='Week'||kind==='Month'||kind==='Custom') && Math.round((Date.parse(to)-Date.parse(from))/864e5)<=62){ const o=[]; for(let d=from; d<=to; d=E.addDays(d,1)) o.push(d); return o; }
+  return [...Array(30).keys()].map(i=>E.addDays(anchor,i-29)); }
 async function vDashboard(m){
   const anchor=S.ui.dAnchor||E.todayISO(); const kind=S.ui.dKind||'Month'; const pid=S.ui.dProc||'';
   const [from,to]=rangeFor(kind,anchor); const A=agg(from,to,pid);
   const wipF=S.wip.filter(w=>!pid||w.processId===pid);
   const del=wipF.filter(w=>w.delay.status==='Delayed'); const cf=S.cfOpen.filter(c=>!pid||c.processId===pid);
-  m.innerHTML=head('Management dashboard',`${fdate(from)} to ${fdate(to)}${pid?' · '+esc(pid+' '+procName(pid)):' · all processes'} · WIP snapshot ${S.wipMeta?fdate(S.wipMeta.snapshotDate):'not loaded'}`,
+  const bookPct=A.pkg?100*A.akg/A.pkg:null;
+  m.innerHTML=head('Management dashboard',`${fdate(from)} to ${fdate(to)}${pid?' · '+esc(pid+' '+procName(pid)):' · all processes'} · WIP snapshot ${S.wipMeta?fdate(S.wipMeta.snapshotDate):'not loaded'} · <span class="legend"><i class="ok"></i>≥ ${ragG()}% <i class="warn"></i>${ragA()}–${ragG()}% <i class="bad"></i>&lt; ${ragA()}%</span>`,
     `<div class="seg" role="group">${['Day','Week','Month','Year','Custom'].map(k=>`<button data-k="${k}" aria-pressed="${k===kind}">${k}</button>`).join('')}</div>
      ${kind==='Custom'?`<input type="date" id="df" value="${from}"><input type="date" id="dt" value="${to}">`:`<input type="date" id="da" value="${anchor}" aria-label="Date">`}
      <select id="dp"><option value="">All processes</option>${sortedProcs().filter(p=>p.active).map(p=>`<option value="${p.id}" ${p.id===pid?'selected':''}>${esc(p.id+' '+p.name)}</option>`).join('')}</select>`)
-   +setupBanners()
-   +`<div class="route" id="route">${sortedProcs().filter(p=>p.active).map(p=>{ const a=agg(from,to,p.id); const w=wipFor(p.id); const d=w.filter(x=>x.delay.status==='Delayed').length;
-      return `<div class="stage ${p.type==='HT'?'ht':''} ${p.id===pid?'sel':''}" data-p="${p.id}" tabindex="0" role="button" aria-label="Filter ${esc(p.name)}"><div class="code">${esc(p.id)}</div><div class="nm">${esc(p.name)}</div>
-        <div class="ad num" style="color:${a.adq===null?'var(--muted)':a.adq>=100?'var(--ok)':a.adq>=90?'var(--warn)':'var(--bad)'}">${pctTxt(a.adq)}</div>
-        <div class="meta">${a.adq===null&&a.pending?'awaiting actuals · ':''}${mt(w.reduce((s,x)=>s+x.wt,0))} MT WIP · ${d} delayed</div></div>`; }).join('')}</div>
-    <div class="kpis" style="margin-top:14px">
-      <div class="kpi"><div class="v num">${fmt(A.pq)}</div><div class="l">Planned qty · ${mt(A.pkg)} MT</div></div>
-      <div class="kpi"><div class="v num">${fmt(A.aq)}</div><div class="l">Actual qty · ${mt(A.akg)} MT (all booked)</div></div>
-      <div class="kpi"><div class="v num">${mt(A.offkg)}</div><div class="l">MT from other planned days / unplanned · ${fmt(A.offq)} pcs</div></div>
-      <div class="kpi ${A.sq?'bad':''}"><div class="v num">${fmt(A.sq)}</div><div class="l">Shortfall qty · ${mt(A.skg)} MT</div></div>
-      <div class="kpi ${ragClass(A.adq)}"><div class="v num">${pctTxt(A.adq)}</div><div class="l">Plan adherence (qty)${A.pending?' · '+A.pending+' plan(s) awaiting actuals':''}</div></div>
-      <div class="kpi ${ragClass(A.adw)}"><div class="v num">${pctTxt(A.adw)}</div><div class="l">Weight adherence</div></div>
-      <div class="kpi"><div class="v num">${pctTxt(A.util)}</div><div class="l">Capacity utilisation</div></div>
-      <div class="kpi"><div class="v num">${fmt(wipF.length)}</div><div class="l">WIP lines · ${mt(wipF.reduce((s,w)=>s+w.wt,0))} MT</div></div>
-      <div class="kpi ${del.length?'bad':''}"><div class="v num">${fmt(del.length)}</div><div class="l">Delayed WIP · ${mt(del.reduce((s,w)=>s+w.wt,0))} MT</div></div>
-      <div class="kpi ${cf.length?'warn':''}"><div class="v num">${fmt(cf.reduce((s,c)=>s+c.qty,0))}</div><div class="l">Carry-forward qty · ${mt(cf.reduce((s,c)=>s+c.kg,0))} MT</div></div></div>
-    <h2>Process-wise</h2>
-    <div class="tbl-wrap"><table><thead><tr><th>Process</th><th class="r">Plan qty</th><th class="r">Actual qty</th><th class="r">Shortfall</th><th class="r">Adherence %</th><th class="r">Plan MT</th><th class="r">Actual MT</th><th class="r">Weight adh. %</th><th class="r">Capacity util.</th><th class="r">Delayed WIP</th><th class="r">CF qty</th></tr></thead><tbody>
-    ${sortedProcs().filter(p=>p.active).map(p=>{ const a=agg(from,to,p.id); const d=wipFor(p.id).filter(w=>w.delay.status==='Delayed').length; const c=S.cfOpen.filter(x=>x.processId===p.id).reduce((s,x)=>s+x.qty,0);
-      return `<tr><td>${esc(p.id+' · '+p.name)}${p.type==='HT'?' <span class="chip heat">HT</span>':''}</td><td class="r num">${fmt(a.pq)}</td><td class="r num">${fmt(a.aq)}</td><td class="r num">${fmt(a.sq)}</td><td class="r">${a.adq===null&&a.pending?'<span class="chip mute">Awaiting actuals</span>':`<span class="chip ${ragClass(a.adq)}">${pctTxt(a.adq)}</span>`}</td><td class="r num">${mt(a.pkg)}</td><td class="r num">${mt(a.akg)}</td><td class="r"><span class="chip ${ragClass(a.adw)}">${pctTxt(a.adw)}</span></td><td class="r num">${pctTxt(a.util)}</td><td class="r num">${d}</td><td class="r num">${fmt(c)}</td></tr>`; }).join('')}</tbody></table></div>
-    <div class="small muted" style="margin-top:6px">Actual = everything booked in the period (incl. castings planned for other days). Adherence = planned lines done by their plan day, counted for plan days whose actuals are submitted or which are over. Green ≥ 100% · Amber 90 to under 100% · Red under 90%. HT capacity utilisation is shown on the HT dashboard (furnace hours).</div>
-    <div class="grid g2" style="margin-top:18px">
-      ${['Daily plan vs actual (30 days)','Weekly plan adherence','Monthly plan adherence','Yearly plan adherence','Process-wise weekly adherence','Shortfall trend (30 days)','Delayed WIP trend','Shortfall reasons (Pareto)'].map((t,i)=>`<div class="panel"><h3>${t}</h3><div class="chart-box"><canvas id="c${i}"></canvas></div></div>`).join('')}</div>`;
+   +`<div class="deck">
+      ${dcard('Plan adherence', pctTxt(A.adq), A.pqC?`${fmt(A.aqC)} of ${fmt(A.pqC)} planned pcs done${A.pending?' · '+A.pending+' plan(s) still open':''}`:'no closed plan days yet', ragClass(A.adq), A.adq, true)}
+      ${dcard('Booked tonnage', mt(A.akg)+' <small>MT</small>', `planned ${mt(A.pkg)} MT · ${pctTxt(bookPct)} of plan`, ragClass(bookPct), bookPct, true)}
+      ${dcard('Capacity utilisation', pctTxt(A.util), `booked MT vs capacity of closed days`, ragClass(A.util), A.util, true)}
+      ${dcard('Delayed WIP', fmt(del.length)+' <small>lines</small>', `${mt(del.reduce((s,w)=>s+w.wt,0))} MT past lead time`, del.length?'bad':'ok', null, true)}
+    </div>
+    <div class="deck small4">
+      ${dcard('Weight adherence', pctTxt(A.adw), 'planned MT done by plan day', ragClass(A.adw))}
+      ${dcard('From other plan days', mt(A.offkg)+' <small>MT</small>', fmt(A.offq)+' pcs booked early / late / unplanned', 'info')}
+      ${dcard('Shortfall', mt(A.skg)+' <small>MT</small>', fmt(A.sq)+' pcs not done on plan day', A.sq?'bad':'ok')}
+      ${dcard('Carry-forward open', fmt(cf.reduce((s,c)=>s+c.qty,0))+' <small>pcs</small>', mt(cf.reduce((s,c)=>s+c.kg,0))+' MT waiting', cf.length?'warn':'ok')}
+      ${dcard('WIP in stages', mt(wipF.reduce((s,w)=>s+w.wt,0))+' <small>MT</small>', fmt(wipF.length)+' lines', 'info')}
+    </div>
+    <h2>Process cards</h2>
+    <div class="pdeck">${sortedProcs().filter(p=>p.active && (!pid||p.id===pid)).map(p=>{ const a=agg(from,to,p.id); const w=wipFor(p.id); const dl=w.filter(x=>x.delay.status==='Delayed');
+      const bp=a.pkg?100*a.akg/a.pkg:null;
+      return `<div class="pcard ${ragClass(a.adq)}" data-p="${p.id}" tabindex="0" role="button" aria-label="Show ${esc(p.name)} only">
+        <div class="ph"><span class="code">${esc(p.id)}</span><b>${esc(p.name)}</b>${p.type==='HT'?'<span class="chip heat">HT</span>':''}</div>
+        <div class="pv num" style="color:${ragColor(a.adq)}">${pctTxt(a.adq)}</div><div class="small muted">plan adherence</div>
+        <div class="pbar"><i style="width:${Math.min(100,bp||0)}%;background:${ragColor(bp)}"></i></div>
+        <div class="pst"><span>Plan <b class="num">${mt(a.pkg)}</b> MT</span><span>Booked <b class="num" style="color:${ragColor(bp)}">${mt(a.akg)}</b> MT</span>
+          <span>WIP <b class="num">${mt(w.reduce((s,x)=>s+x.wt,0))}</b> MT</span><span>Delayed <b class="num" style="color:${dl.length?'var(--bad)':'var(--ok)'}">${dl.length}</b> lines</span></div>
+        <canvas class="spark" id="sp${p.id}" height="38" aria-hidden="true"></canvas></div>`; }).join('')}</div>
+    <div class="grid g2" style="margin-top:16px">
+      <div class="panel"><h3>Daily plan adherence %</h3><div class="ch"><canvas id="g1"></canvas></div></div>
+      <div class="panel"><h3>Daily planned vs booked MT</h3><div class="ch"><canvas id="g2"></canvas></div></div>
+      <div class="panel"><h3>Process-wise planned vs booked MT</h3><div class="ch"><canvas id="g3"></canvas></div></div>
+      <div class="panel"><h3>Weekly adherence – last 12 weeks</h3><div class="ch"><canvas id="g4"></canvas></div></div>
+      <div class="panel"><h3>Shortfall reasons (Pareto)</h3><div class="ch"><canvas id="g5"></canvas></div></div>
+      <div class="panel"><h3>Delayed WIP trend</h3><div class="ch"><canvas id="g6"></canvas></div></div>
+    </div>
+    <h2>Most delayed WIP <span class="small muted">(red = past lead time)</span></h2>
+    ${del.length?`<div class="tbl-wrap" style="max-height:420px"><table><thead><tr><th>Process</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Customer</th><th>Start date</th><th class="r">Delay (days)</th><th class="r">kg</th></tr></thead><tbody>
+      ${del.slice().sort((a,b)=>(b.delay.delayDays||0)-(a.delay.delayDays||0)).slice(0,20).map(w=>`<tr class="rowbad"><td>${esc(w.processId)}</td><td><b>${esc(w.uid)}</b></td><td>${esc(w.job)}</td><td>${esc(w.die)}</td><td class="wrap">${esc(w.desc)}</td><td>${esc(w.met)}</td><td>${esc(w.cust)}</td><td>${fdate(w.start)}</td><td class="r num"><b>${fmt(w.delay.delayDays)}</b></td><td class="r num">${fmt(w.wt,1)}</td></tr>`).join('')}</tbody></table></div>`
+      :`<div class="empty">${S.wip.length?'No delayed WIP. ✔':'No WIP loaded.'}</div>`}`;
   m.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{ S.ui.dKind=b.dataset.k; go('dashboard'); });
   if($('#da')) $('#da').onchange=e=>{ S.ui.dAnchor=e.target.value; go('dashboard'); };
   if($('#df')) { $('#df').onchange=e=>{ S.ui.dFrom=e.target.value; go('dashboard'); }; $('#dt').onchange=e=>{ S.ui.dTo=e.target.value; go('dashboard'); }; }
   $('#dp').onchange=e=>{ S.ui.dProc=e.target.value; go('dashboard'); };
-  m.querySelectorAll('.stage').forEach(s=>{ const f=()=>{ S.ui.dProc=S.ui.dProc===s.dataset.p?'':s.dataset.p; go('dashboard'); }; s.onclick=f; s.onkeydown=e=>{ if(e.key==='Enter') f(); }; });
-  drawDashCharts(anchor, pid, A);
+  m.querySelectorAll('.pcard').forEach(s=>{ const f=()=>{ S.ui.dProc=S.ui.dProc===s.dataset.p?'':s.dataset.p; go('dashboard'); }; s.onclick=f; s.onkeydown=e=>{ if(e.key==='Enter') f(); }; });
+  drawDash2(kind,from,to,anchor,pid,A);
 }
-function drawDashCharts(anchor, pid, A){
-  const steel='#3E6283', heat='#D9730D', bad='#B8322A', ok='#2D7A4C';
-  const pctAxis={ min:0, suggestedMax:110, ticks:{callback:v=>v+'%'} };
-  // 1 daily
-  const days=[...Array(30).keys()].map(i=>E.addDays(anchor,i-29)); const dA=days.map(d=>agg(d,d,pid));
-  mkChart($('#c0'),{type:'bar',data:{labels:days.map(d=>d.slice(8)+'/'+d.slice(5,7)),datasets:[
-    {label:'Planned MT',data:dA.map(a=>a.pkg/1000),backgroundColor:'#B9C9D8'},{label:'Actual MT',data:dA.map(a=>a.akg/1000),backgroundColor:steel},
-    {type:'line',label:'Adherence %',data:dA.map(a=>a.adq),yAxisID:'y1',borderColor:heat,backgroundColor:heat,spanGaps:true,pointRadius:2}]},
-    options:{maintainAspectRatio:false,scales:{y:{title:{display:true,text:'MT'}},y1:{position:'right',...pctAxis,grid:{display:false}}}}});
-  // 2 weekly
+function drawDash2(kind,from,to,anchor,pid,A){
+  if(typeof Chart==='undefined'){ document.querySelectorAll('.ch').forEach(c=>c.innerHTML='<div class="empty">Charts need Chart.js (internet or lib folder).</div>'); return; }
+  const G=ragG(), steel='#3E6283', light='#B9C9D8', bad='#B8322A';
+  const pctAxis={min:0, suggestedMax:110, ticks:{callback:v=>v+'%'}};
+  const base={maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{boxWidth:12}}}, interaction:{mode:'index',intersect:false}};
+  const days=chartDays(kind,from,to,anchor); const dA=days.map(d=>agg(d,d,pid)); const lab=days.map(d=>d.slice(8)+'/'+d.slice(5,7));
+  const target=v=>({label:'Target '+G+'%', data:days.map(()=>v), borderColor:'#2D7A4C', borderDash:[6,4], pointRadius:0, borderWidth:1.5, fill:false});
+  mkChart($('#g1'),{type:'line',data:{labels:lab,datasets:[{label:'Adherence %',data:dA.map(a=>a.adq),borderColor:steel,backgroundColor:'rgba(62,98,131,.10)',fill:true,tension:.3,spanGaps:true,
+      pointRadius:4,pointBackgroundColor:dA.map(a=>ragColor(a.adq)),pointBorderColor:dA.map(a=>ragColor(a.adq))}, target(G)]},options:{...base,scales:{y:pctAxis}}});
+  mkChart($('#g2'),{type:'bar',data:{labels:lab,datasets:[{label:'Planned MT',data:dA.map(a=>a.pkg/1000),backgroundColor:light,borderRadius:4},
+      {label:'Booked MT',data:dA.map(a=>a.akg/1000),backgroundColor:dA.map(a=>a.pkg?ragColor(100*a.akg/a.pkg):steel),borderRadius:4}]},options:{...base,scales:{y:{beginAtZero:true,title:{display:true,text:'MT'}}}}});
+  const ps=sortedProcs().filter(p=>p.active && (!pid||p.id===pid)); const pA=ps.map(p=>agg(from,to,p.id));
+  mkChart($('#g3'),{type:'bar',data:{labels:ps.map(p=>p.id+' '+p.name),datasets:[{label:'Planned MT',data:pA.map(a=>a.pkg/1000),backgroundColor:light,borderRadius:4},
+      {label:'Booked MT',data:pA.map(a=>a.akg/1000),backgroundColor:pA.map(a=>a.pkg?ragColor(100*a.akg/a.pkg):steel),borderRadius:4}]},options:{...base,indexAxis:'y',scales:{x:{beginAtZero:true,title:{display:true,text:'MT'}}}}});
   const wks=[...Array(12).keys()].map(i=>E.addDays(E.weekStart(anchor),(i-11)*7)); const wA=wks.map(w=>agg(w,E.addDays(w,6),pid));
-  mkChart($('#c1'),{type:'line',data:{labels:wks.map(w=>fdate(w).slice(0,6)),datasets:[{label:'Qty adherence %',data:wA.map(a=>a.adq),borderColor:steel,spanGaps:true},{label:'Weight adherence %',data:wA.map(a=>a.adw),borderColor:heat,spanGaps:true}]},options:{maintainAspectRatio:false,scales:{y:pctAxis}}});
-  // 3 monthly
-  const ms=[...Array(12).keys()].map(i=>{ const d=new Date(Date.UTC(+anchor.slice(0,4),+anchor.slice(5,7)-12+i,1)); return d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1); });
-  const mA=ms.map(mo=>agg(mo+'-01',mo+'-31',pid));
-  mkChart($('#c2'),{type:'bar',data:{labels:ms,datasets:[{label:'Qty adherence %',data:mA.map(a=>a.adq),backgroundColor:steel},{label:'Weight adherence %',data:mA.map(a=>a.adw),backgroundColor:heat}]},options:{maintainAspectRatio:false,scales:{y:pctAxis}}});
-  // 4 yearly
-  const yrs=[...new Set(Object.keys(S.sums).map(d=>d.slice(0,4)))].sort(); const yA=yrs.map(y=>agg(y+'-01-01',y+'-12-31',pid));
-  mkChart($('#c3'),{type:'bar',data:{labels:yrs,datasets:[{label:'Qty adherence %',data:yA.map(a=>a.adq),backgroundColor:steel},{label:'Weight adherence %',data:yA.map(a=>a.adw),backgroundColor:heat}]},options:{maintainAspectRatio:false,scales:{y:pctAxis}}});
-  // 5 process-wise weekly
-  const pal=['#2C4760','#D9730D','#2D7A4C','#8E44AD','#B8322A','#16A085','#7F8C8D','#C29B00','#2980B9','#6D4C41'];
-  mkChart($('#c4'),{type:'line',data:{labels:wks.map(w=>fdate(w).slice(0,6)),datasets:sortedProcs().filter(p=>p.active && (!pid||p.id===pid)).map((p,i)=>({label:p.id,data:wks.map(w=>agg(w,E.addDays(w,6),p.id).adq),borderColor:pal[i%pal.length],spanGaps:true,pointRadius:2}))},options:{maintainAspectRatio:false,scales:{y:pctAxis}}});
-  // 6 shortfall
-  mkChart($('#c5'),{type:'bar',data:{labels:days.map(d=>d.slice(8)+'/'+d.slice(5,7)),datasets:[{label:'Shortfall MT',data:dA.map(a=>a.skg/1000),backgroundColor:bad}]},options:{maintainAspectRatio:false}});
-  // 7 delayed WIP trend from upload snapshots
-  const sd=Object.keys(S.snaps).sort().slice(-60);
-  mkChart($('#c6'),{type:'line',data:{labels:sd.map(d=>d.slice(8)+'/'+d.slice(5,7)),datasets:[{label:'Delayed WIP lines',data:sd.map(d=>pid?((S.snaps[d].byP||{})[pid]||{}).delayed||0:S.snaps[d].delayed),borderColor:bad,backgroundColor:bad,pointRadius:3}]},options:{maintainAspectRatio:false,scales:{y:{beginAtZero:true,suggestedMax:10}}}});
-  // 8 pareto
+  mkChart($('#g4'),{type:'bar',data:{labels:wks.map(w=>fdate(w).slice(0,6)),datasets:[{type:'line',label:'Target '+G+'%',data:wks.map(()=>G),borderColor:'#2D7A4C',borderDash:[6,4],pointRadius:0,borderWidth:1.5},
+      {label:'Adherence %',data:wA.map(a=>a.adq),backgroundColor:wA.map(a=>ragColor(a.adq)),borderRadius:4}]},options:{...base,scales:{y:pctAxis}}});
   const rs=Object.entries(A.reasons).sort((a,b)=>b[1].q-a[1].q); const tot=rs.reduce((s,r)=>s+r[1].q,0); let cum=0;
-  mkChart($('#c7'),{type:'bar',data:{labels:rs.map(r=>r[0]),datasets:[{label:'Shortfall qty',data:rs.map(r=>r[1].q),backgroundColor:steel},{type:'line',label:'Cumulative %',data:rs.map(r=>{ cum+=r[1].q; return tot?100*cum/tot:0; }),yAxisID:'y1',borderColor:heat,backgroundColor:heat}]},
-    options:{maintainAspectRatio:false,scales:{y1:{position:'right',min:0,max:100,ticks:{callback:v=>v+'%'},grid:{display:false}}}}});
+  if(rs.length) mkChart($('#g5'),{type:'bar',data:{labels:rs.map(r=>r[0]),datasets:[{label:'Shortfall qty',data:rs.map(r=>r[1].q),backgroundColor:bad,borderRadius:4},
+      {type:'line',label:'Cumulative %',data:rs.map(r=>{ cum+=r[1].q; return tot?100*cum/tot:0; }),yAxisID:'y1',borderColor:'#D9730D',backgroundColor:'#D9730D',pointRadius:3}]},
+      options:{...base,scales:{y:{beginAtZero:true},y1:{position:'right',min:0,max:100,ticks:{callback:v=>v+'%'},grid:{display:false}}}}});
+  else $('#g5').parentElement.innerHTML='<div class="empty">No shortfall in this period. ✔</div>';
+  const sd=Object.keys(S.snaps||{}).sort().slice(-60);
+  if(sd.length) mkChart($('#g6'),{type:'line',data:{labels:sd.map(d=>d.slice(8)+'/'+d.slice(5,7)),datasets:[{label:'Delayed WIP lines',data:sd.map(d=>pid?((S.snaps[d].byP||{})[pid]||{}).delayed||0:S.snaps[d].delayed),borderColor:bad,backgroundColor:'rgba(184,50,42,.12)',fill:true,tension:.3,pointRadius:3,pointBackgroundColor:bad}]},options:{...base,scales:{y:{beginAtZero:true}}}});
+  else $('#g6').parentElement.innerHTML='<div class="empty">Builds up with each WIP upload.</div>';
+  // sparklines in the process cards: daily adherence of the last 14 days
+  const sp=[...Array(14).keys()].map(i=>E.addDays(anchor,i-13));
+  ps.forEach(p=>{ const el=$('#sp'+p.id); if(!el) return; const v=sp.map(d=>agg(d,d,p.id).adq);
+    mkChart(el,{type:'line',data:{labels:sp,datasets:[{data:v,borderColor:steel,borderWidth:1.5,pointRadius:2,pointBackgroundColor:v.map(x=>ragColor(x)),spanGaps:true,tension:.3}]},
+      options:{maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false,min:0,max:120}}}}); });
 }
-
-/* ===================== WIP STATUS ===================== */
-const ageBucket=a=>a===null||a===undefined?'Unknown':a<=7?'0–7 days':a<=15?'8–15 days':a<=30?'16–30 days':a<=60?'31–60 days':a<=90?'61–90 days':'Over 90 days';
 function wipState(w){ return w.completed?'Completed':w.cf.length?'Carry-forward':w.planned?'Planned':'Waiting'; }
 function vWip(m){
   const procs=sortedProcs().filter(p=>canSeeProc(p.id));
@@ -2394,7 +2452,7 @@ function vWip(m){
       <label class="field">Move selected to<select id="wto">${sortedProcs().filter(p=>p.active).map(p=>`<option value="${p.id}">${esc(p.id+' · '+p.name)}</option>`).join('')}<option value="">Finished – remove from WIP</option></select></label>
       <button class="btn" id="wmove" disabled>Move</button><span class="small muted">Use for corrections, e.g. sending a casting to subcontract fettling instead of in-house.</span></div></div>`:''}
     <div class="tbl-wrap"><table><thead><tr>${mv?'<th><input type="checkbox" id="wall" aria-label="Select all shown"></th>':''}<th>Process</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Customer</th><th class="r">Qty</th><th class="r">kg</th><th>Start</th><th class="r">LT d</th><th>Target</th><th>Delay</th><th>State</th>${routingOn()?'<th>Next stage</th>':''}<th>Data note</th></tr></thead><tbody>
-    ${list.slice().sort((a,b)=>(b.delay.delayDays||0)-(a.delay.delayDays||0)).slice(0,400).map(w=>`<tr>${mv?`<td><input type="checkbox" data-wk="${esc(w.key)}" ${S.ui.wSel&&S.ui.wSel[w.key]?'checked':''}></td>`:''}<td>${esc(w.processId)}</td><td>${esc(w.uid)}</td><td>${esc(w.job)}</td><td>${esc(w.die)}</td><td class="wrap">${esc(w.desc)}</td><td>${esc(w.met)}</td><td>${esc(w.cust)}</td><td class="r num">${fmt(w.qty)}</td><td class="r num">${fmt(w.wt,1)}</td><td>${fdate(w.start)}</td><td class="r num">${w.lt?fmt(w.lt.days,1):'–'}</td><td>${fdate(w.delay.target)}</td><td>${delayChip(w.delay.status,w.delay.delayDays)}</td><td><span class="chip ${wipState(w)==='Carry-forward'?'warn':wipState(w)==='Waiting'?'mute':'blue'}">${wipState(w)}</span></td>${routingOn()?`<td class="small">${(()=>{ const n=nextStage(w,w.processId); return n.to?esc(n.to+' · '+procName(n.to)):`<span class="${n.note==='Route complete'?'muted':'chip warn'}">${esc(n.note==='Route complete'?'Finished after this stage':n.note)}</span>`; })()}</td>`:''}<td class="small muted">${esc((w.issues||[]).join('; '))}</td></tr>`).join('')}</tbody></table></div>`;
+    ${list.slice().sort((a,b)=>(b.delay.delayDays||0)-(a.delay.delayDays||0)).slice(0,400).map(w=>`<tr class="${w.delay.status==='Delayed'?'rowbad':''}">${mv?`<td><input type="checkbox" data-wk="${esc(w.key)}" ${S.ui.wSel&&S.ui.wSel[w.key]?'checked':''}></td>`:''}<td>${esc(w.processId)}</td><td>${esc(w.uid)}</td><td>${esc(w.job)}</td><td>${esc(w.die)}</td><td class="wrap">${esc(w.desc)}</td><td>${esc(w.met)}</td><td>${esc(w.cust)}</td><td class="r num">${fmt(w.qty)}</td><td class="r num">${fmt(w.wt,1)}</td><td>${fdate(w.start)}</td><td class="r num">${w.lt?fmt(w.lt.days,1):'–'}</td><td>${fdate(w.delay.target)}</td><td>${delayChip(w.delay.status,w.delay.delayDays)}</td><td><span class="chip ${wipState(w)==='Carry-forward'?'warn':wipState(w)==='Waiting'?'mute':'blue'}">${wipState(w)}</span></td>${routingOn()?`<td class="small">${(()=>{ const n=nextStage(w,w.processId); return n.to?esc(n.to+' · '+procName(n.to)):`<span class="${n.note==='Route complete'?'muted':'chip warn'}">${esc(n.note==='Route complete'?'Finished after this stage':n.note)}</span>`; })()}</td>`:''}<td class="small muted">${esc((w.issues||[]).join('; '))}</td></tr>`).join('')}</tbody></table></div>`;
   if(mv){
     const upd=()=>{ const n=Object.keys(S.ui.wSel).length; $('#wselc').textContent=n+' selected'; $('#wmove').disabled=!n; };
     m.querySelectorAll('[data-wk]').forEach(cb=>cb.onchange=()=>{ if(cb.checked) S.ui.wSel[cb.dataset.wk]=1; else delete S.ui.wSel[cb.dataset.wk]; upd(); });
@@ -2455,6 +2513,66 @@ async function vDataCheck(m){
       await audit('Remove duplicate WIP lines', removed+' line(s) in '+pids.join(', ')); await reloadWip(); toast(removed+' duplicate line(s) removed.'); go('datacheck'); }}]);
 }
 
+/* ===================== DEPARTMENT MODULE ===================== */
+/* one workspace per department (e.g. Knock Out & RR Cutting): overview, WIP, plan, execution, uploads – only its processes */
+async function vDept(m){
+  const dep=deptById(S.ui.deptId) || myDepts()[0];
+  if(!dep){ m.innerHTML=head('Department')+'<div class="empty">No department is assigned to your user. Ask the administrator.</div>'; return; }
+  S.ui.deptId=dep.id;
+  const pids=dep.processes.filter(id=>{ const p=procById(id); return p && p.active && (isRole('Admin','Management') || (S.user.processes||[]).includes(id)); });
+  S.deptCtx={id:dep.id, pids};
+  const hasHT=pids.some(id=>procById(id).type==='HT'), hasNormal=pids.some(id=>procById(id).type!=='HT');
+  const tabs=[['overview','Overview'],['wip','WIP status'],['plan','Day plan'],
+    hasNormal && isRole('Admin','Department User')?['exec','Execution entry']:null,
+    hasHT?['ht','Furnace loads']:null, hasHT?['htdash','HT dashboard']:null,
+    ['upload','Upload Synchro WIP'],['booking','Upload Synchro booking']].filter(Boolean);
+  let tab=S.ui.deptTab; if(!tabs.some(t=>t[0]===tab)) tab='overview'; S.ui.deptTab=tab;
+  m.innerHTML=`<div class="dhead"><h1 style="margin:0 12px 0 0">${esc(dep.name)}</h1>${pids.map(id=>`<span class="chip mute">${esc(id+' '+procName(id))}</span>`).join('')}</div>
+    <div class="tabs" style="margin-bottom:14px">${tabs.map(([k,l])=>`<button data-dt="${k}" aria-selected="${k===tab}">${l}</button>`).join('')}</div><div id="dsub"></div>`;
+  m.querySelectorAll('[data-dt]').forEach(b=>b.onclick=()=>{ S.ui.deptTab=b.dataset.dt; go('dept'); });
+  if(!pids.length){ $('#dsub').innerHTML='<div class="empty">No active process in this department.</div>'; return; }
+  const sub=$('#dsub');
+  const fn={overview:vDeptOverview, wip:vWip, plan:vPlan, exec:vExec, ht:vHT, htdash:vHTDash, upload:x=>{ S.ui.upTab='wip'; return vUpload(x); }, booking:x=>{ S.ui.upTab='book'; return vUpload(x); }}[tab];
+  await fn(sub);
+}
+function vDeptOverview(m){
+  const pids=S.deptCtx.pids; const today=E.todayISO(); const mStart=today.slice(0,8)+'01';
+  const sumOf=(pid,from,to)=>{ const a={pq:0,pkg:0,aq:0,akg:0,tkg:0,offkg:0,pqC:0,aqC:0};
+    Object.entries(S.sums||{}).forEach(([d,o])=>{ if(d<from||d>to) return; const s=o[pid]; if(!s) return;
+      a.pq+=s.pq; a.pkg+=s.pkg; a.tkg+=(s.tkg!==undefined?s.tkg:s.akg); a.offkg+=s.offkg||0;
+      if(s.submitted||d<today){ a.pqC+=s.pq; a.aqC+=s.aq; } });
+    a.ad=a.pqC?100*a.aqC/a.pqC:null; return a; };
+  const rows=pids.map(pid=>{ const p=procById(pid); const w=S.wip.filter(x=>x.processId===pid);
+    const del=w.filter(x=>x.delay && x.delay.status==='Delayed'); const t=sumOf(pid,today,today), mtd=sumOf(pid,mStart,today);
+    const nextD=Object.keys(S.planIdx||{}).filter(d=>d>=today && S.planIdx[d].includes(pid)).sort();
+    return {p, wl:w.length, wkg:w.reduce((s,x)=>s+x.wt,0), dkg:del.reduce((s,x)=>s+x.wt,0), dl:del.length, t, mtd, cf:S.cfOpen.filter(c=>c.processId===pid).length,
+      planTo:nextD.length?nextD[nextD.length-1]:null, cap:capFor(pid,today)}; });
+  const tot=k=>rows.reduce((s,r)=>s+k(r),0);
+  const mtdAll={pqC:tot(r=>r.mtd.pqC), aqC:tot(r=>r.mtd.aqC)}; const adAll=mtdAll.pqC?100*mtdAll.aqC/mtdAll.pqC:null;
+  const todayPct=tot(r=>r.t.pkg)?100*tot(r=>r.t.tkg)/tot(r=>r.t.pkg):null;
+  m.innerHTML=`<div class="deck">
+      ${dcard('Plan adherence – this month', pctTxt(adAll), 'planned pcs done by their plan day', ragClass(adAll), adAll, true)}
+      ${dcard('Booked today', mt(tot(r=>r.t.tkg))+' <small>MT</small>', 'planned today '+mt(tot(r=>r.t.pkg))+' MT · '+pctTxt(todayPct), ragClass(todayPct), todayPct, true)}
+      ${dcard('Tonnage this month', mt(tot(r=>r.mtd.tkg))+' <small>MT</small>', mt(tot(r=>r.mtd.offkg))+' MT from other plan days', 'info', null, true)}
+      ${dcard('Delayed WIP', fmt(tot(r=>r.dl))+' <small>lines</small>', mt(tot(r=>r.dkg))+' MT past lead time', tot(r=>r.dl)?'bad':'ok', null, true)}
+    </div><div class="deck small4">
+      ${dcard('WIP in department', mt(tot(r=>r.wkg))+' <small>MT</small>', fmt(tot(r=>r.wl))+' lines', 'info')}
+      ${dcard('Open carry-forward', fmt(tot(r=>r.cf))+' <small>lines</small>', 'waiting from earlier days', tot(r=>r.cf)?'warn':'ok')}
+    </div>
+    <div class="tbl-wrap" style="margin-top:14px"><table><thead><tr><th>Process</th><th class="r">WIP lines</th><th class="r">WIP MT</th><th class="r">Delayed MT</th><th class="r">Capacity MT/day</th><th class="r">Planned today</th><th class="r">Booked today</th><th class="r">Month tonnage</th><th class="r">of which other days</th><th class="r">Month adherence</th><th class="r">Open CF</th><th>Planned until</th></tr></thead><tbody>
+      ${rows.map(r=>`<tr><td><b>${esc(r.p.id+' '+r.p.name)}</b>${r.p.type==='HT'?' <span class="chip heat">HT</span>':''}</td><td class="r num">${fmt(r.wl)}</td><td class="r num">${mt(r.wkg)}</td><td class="r num" style="color:${r.dl?'var(--bad)':''};font-weight:${r.dl?600:400}">${mt(r.dkg)}</td><td class="r num">${fmt(r.cap,1)}</td><td class="r num">${mt(r.t.pkg)}</td><td class="r num">${mt(r.t.tkg)}</td><td class="r num">${mt(r.mtd.tkg)}</td><td class="r num">${mt(r.mtd.offkg)}</td><td class="r"><b class="num" style="color:${ragColor(r.mtd.ad)}">${pctTxt(r.mtd.ad)}</b></td><td class="r num">${fmt(r.cf)}</td><td>${r.planTo?fday(r.planTo):'<span class="chip warn">no plan</span>'}</td></tr>`).join('')}</tbody></table></div>
+    <h2>Last 14 days – planned vs booked MT</h2><div class="panel"><canvas id="dch" height="90" aria-label="Planned and booked tonnage per day"></canvas></div>
+    <div class="row" style="margin-top:12px">${['upload','booking',isRole('Admin','Department User')?'exec':null,'plan'].filter(Boolean).map(k=>`<button class="btn ghost" data-go="${k}">${{upload:'Upload Synchro WIP',booking:'Upload Synchro booking',exec:'Enter actuals',plan:'Day plan'}[k]}</button>`).join('')}</div>`;
+  m.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go));
+  const days=[]; for(let i=13;i>=0;i--) days.push(E.addDays(today,-i));
+  if(typeof Chart!=='undefined'){
+    const pl=days.map(d=>pids.reduce((s,pid)=>s+(((S.sums[d]||{})[pid]||{}).pkg||0),0)/1000);
+    const bk=days.map(d=>pids.reduce((s,pid)=>{ const x=(S.sums[d]||{})[pid]; return s+(x?(x.tkg!==undefined?x.tkg:x.akg):0); },0)/1000);
+    S.charts.push(new Chart($('#dch'),{type:'bar',data:{labels:days.map(d=>fdate(d).slice(0,6)),datasets:[{label:'Planned MT',data:pl,backgroundColor:'#B9C9D8',borderRadius:4},{label:'Booked MT',data:bk,backgroundColor:bk.map((v,i)=>pl[i]?ragColor(100*v/pl[i]):'#3E6283'),borderRadius:4}]},
+      options:{responsive:true,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true,title:{display:true,text:'MT'}}}}}));
+  }
+}
+
 /* ===================== MASTERS ===================== */
 const DAYN=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 function editorTable(id, cols, rows){
@@ -2509,11 +2627,12 @@ const MASTERS={
 function vMasters(m){
   const tab=S.ui.mTab||'Processes';
   m.innerHTML=head('Masters','Configuration used by the planning engine. Every save is recorded in the audit trail.')+setupBanners()
-    +`<div class="tabs" role="tablist">${['Processes','Lead times','Routing','HT recipes','Furnaces','Holidays','Users','Reasons','Settings'].map(t=>`<button role="tab" aria-selected="${t===tab}" data-t="${t}">${t}</button>`).join('')}</div><div id="mb"></div>`;
+    +`<div class="tabs" role="tablist">${['Departments','Processes','Lead times','Routing','HT recipes','Furnaces','Holidays','Users','Reasons','Settings'].map(t=>`<button role="tab" aria-selected="${t===tab}" data-t="${t}">${t}</button>`).join('')}</div><div id="mb"></div>`;
   m.querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{ S.ui.mTab=b.dataset.t; go('masters'); });
   const mb=$('#mb');
   if(tab==='Lead times') return vLeadTimes(mb);
   if(tab==='Users') return vUsers(mb);
+  if(tab==='Departments') return vDepts(mb);
   if(tab==='Routing') return vRouting(mb);
   if(tab==='Reasons'){
     mb.innerHTML=`<div class="panel"><p class="small muted">One shortfall reason per line. These appear in the execution screens and the Pareto.</p><textarea id="rsn" rows="14" style="width:100%">${esc(S.cfg.reasons.join('\n'))}</textarea><div class="row" style="margin-top:10px"><button class="btn" id="rsave">Save reasons</button></div></div>`;
@@ -2521,7 +2640,7 @@ function vMasters(m){
     return;
   }
   if(tab==='Settings'){
-    const st=S.cfg.settings; const F=[['plantName','Plant name','text'],['defaultCapMT','Default capacity MT/day','num'],['amberDays','Due-soon warning (days before target)','num'],['postingLag','Synchro posting lag (days)','num'],['horizonDays','Normal planning forecast (working days)','num'],['htHorizonH','HT scheduling horizon (hours)','num']];
+    const st=S.cfg.settings; const F=[['plantName','Plant name','text'],['defaultCapMT','Default capacity MT/day','num'],['amberDays','Due-soon warning (days before target)','num'],['postingLag','Synchro posting lag (days)','num'],['ragGreen','Green from % (adherence, booked vs plan)','num'],['ragAmber','Amber from % (below this = red)','num'],['horizonDays','Normal planning forecast (working days)','num'],['htHorizonH','HT scheduling horizon (hours)','num']];
     mb.innerHTML=`<div class="panel"><div class="grid g3">${F.map(([k,l,t])=>`<label class="field">${l}<input id="s_${k}" ${t==='num'?'type="number" step="any"':''} value="${esc(st[k])}"></label>`).join('')}</div>
       <p class="small muted">Posting lag: actuals reported on or after (WIP snapshot date − lag) are deducted from To Do Qty, so a casting finished yesterday but not yet moved in Synchro is not planned again.</p><button class="btn" id="ssave">Save settings</button></div>`;
     $('#ssave').onclick=async()=>{ await saveConfig(c=>{ F.forEach(([k,l,t])=>{ const v=$('#s_'+k).value; c.settings[k]=t==='num'?+v:v; }); },'Settings'); await loadAll(); toast('Settings saved.'); go('masters'); };
@@ -2739,7 +2858,7 @@ const ROLE_INFO={ 'Admin':'Everything: masters, users, Synchro upload, publishin
 function vUsers(mb){
   const fb=Store.mode==='firebase'; const users=S.cfg.users||[];
   const roleChip=r=>`<span class="chip ${r==='Admin'?'heat':r==='Management'?'blue':r==='HT User'?'warn':'ok'}">${esc(r)}</span>`;
-  const procChips=u=>(u.role==='Admin'||u.role==='Management')?'<span class="muted small">all processes</span>':((u.processes||[]).length?(u.processes||[]).map(id=>`<span class="chip mute">${esc(id+' '+procName(id))}</span>`).join(' '):'<span class="chip bad">none – edit</span>');
+  const procChips=u=>(u.role==='Admin'||u.role==='Management')?'<span class="muted small">all departments</span>':deptList().filter(dd=>dd.processes.some(p=>(u.processes||[]).includes(p))).map(dd=>`<span class="chip blue">${esc(dd.name)}</span>`).join(' ')+' '+((u.processes||[]).length?(u.processes||[]).map(id=>`<span class="chip mute">${esc(id+' '+procName(id))}</span>`).join(' '):'<span class="chip bad">none – edit</span>');
   mb.innerHTML=`<div class="row" style="justify-content:space-between;margin-bottom:10px"><div><b>${users.length} user(s)</b> <span class="small muted">· each person signs in with his own user name and password${fb?'':' (PIN)'} and can change it with “Change password” (bottom-left).</span></div>
       <button class="btn heat" id="uadd">+ Add user</button></div>
     <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>User name (login)</th><th>Role</th><th>Processes</th><th></th></tr></thead><tbody>
@@ -2762,7 +2881,9 @@ function userDialog(idx){
       <label class="field">User name (login) *<input id="un_user" value="${esc(u.username)}" ${isNew?'':'disabled'} placeholder="e.g. rahul" autocomplete="off"><span class="small muted" id="un_userhint">${isNew?'Small letters/digits, no spaces – suggested from the name.':'The login name cannot be changed.'}</span></label>
     </div>
     <label class="field" style="margin-top:10px">Role *<select id="un_role" ${me?'disabled':''}>${Object.keys(ROLE_INFO).map(r=>`<option ${r===u.role?'selected':''}>${r}</option>`).join('')}</select><span class="small muted" id="un_rinfo"></span></label>
-    <div id="un_pbox" style="margin-top:10px"><div class="field">Processes * <span class="small muted">(what this person plans / enters)</span></div>
+    <div id="un_dbox" style="margin-top:10px"><div class="field">Department(s) * <span class="small muted">(the module(s) this person sees)</span></div>
+      <div class="grid g3" style="gap:4px;margin-top:4px">${deptList().map(dd=>`<label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-ud="${dd.id}" ${dd.processes.length && dd.processes.every(p=>(u.processes||[]).includes(p))?'checked':''}> <b>${esc(dd.name)}</b> <span class="muted">${esc(dd.processes.join(', '))}</span></label>`).join('')}</div></div>
+    <div id="un_pbox" style="margin-top:10px"><div class="field">Processes * <span class="small muted">(filled from the department – untick a process to limit the person)</span></div>
       <div class="grid g3" style="gap:4px;margin-top:4px">${procs.map(p=>`<label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-up="${p.id}" ${(u.processes||[]).includes(p.id)?'checked':''}> <b>${esc(p.id)}</b> ${esc(p.name)}${p.type==='HT'?' <span class="chip heat">HT</span>':''}</label>`).join('')}</div></div>
     ${isNew?`<div class="grid g2" style="margin-top:10px">
       <label class="field">${fb?'Password (at least 6 characters)':'PIN'} *<input type="password" id="un_pw" autocomplete="new-password"></label>
@@ -2805,7 +2926,8 @@ function userDialog(idx){
   const role=d.querySelector('#un_role'), pbox=d.querySelector('#un_pbox'), info=d.querySelector('#un_rinfo');
   const upd=()=>{ info.textContent=ROLE_INFO[role.value]; pbox.hidden=(role.value==='Admin'||role.value==='Management');
     if(role.value==='HT User'){ const ht=htProc(); if(ht){ const cb=d.querySelector(`[data-up="${ht.id}"]`); if(cb && !d.querySelectorAll('[data-up]:checked').length) cb.checked=true; } } };
-  role.onchange=upd; upd();
+  role.onchange=()=>{ upd(); d.querySelector('#un_dbox').hidden=pbox.hidden; }; upd(); d.querySelector('#un_dbox').hidden=pbox.hidden;
+  d.querySelectorAll('[data-ud]').forEach(cb=>cb.onchange=()=>{ const dd=deptById(cb.dataset.ud); dd.processes.forEach(pid=>{ const x=d.querySelector(`[data-up="${pid}"]`); if(x) x.checked=cb.checked; }); });
   if(isNew){ const nm=d.querySelector('#un_name'), us=d.querySelector('#un_user'); let touched=false;
     us.oninput=()=>{ touched=true; }; nm.oninput=()=>{ if(!touched) us.value=normUser(nm.value.split(' ')[0]||''); };
     d.querySelector('#un_show').onchange=e=>{ ['#un_pw','#un_pw2'].forEach(s=>d.querySelector(s).type=e.target.checked?'text':'password'); }; }
@@ -2826,6 +2948,27 @@ function setUserPin(idx){
     [{label:'Set PIN', cls:'heat', fn:async d=>{ const a=d.querySelector('#np1').value, b=d.querySelector('#np2').value;
       if(!a || a!==b){ d.querySelector('#npm').textContent='Type the same PIN twice.'; return false; }
       await saveConfig(c=>{ const x=c.users.find(y=>y.username===u.username); x.pin=pinHash(u.username,a); delete x.demo; }, 'PIN reset for '+u.username); toast('PIN changed for '+u.username+'.'); go('masters'); }}]);
+}
+
+/* ===================== DEPARTMENTS master ===================== */
+function vDepts(mb){
+  const ds=JSON.parse(JSON.stringify(deptList())); const procs=sortedProcs();
+  const draw=()=>{
+    const used={}; ds.forEach(d=>d.processes.forEach(p=>used[p]=(used[p]||0)+1));
+    mb.innerHTML=`<p class="small muted">A department is a module of the app: its users see only its processes, and upload WIP / booking, plan and enter actuals for those processes. A process should belong to one department.</p>
+      ${ds.map((d,i)=>`<div class="panel" style="margin-bottom:10px"><div class="row" style="justify-content:space-between"><label class="field">Department name<input data-dn="${i}" value="${esc(d.name)}" style="width:280px"></label><button class="btn danger sm" data-dx="${i}">Remove</button></div>
+        <div class="grid g3" style="gap:4px;margin-top:8px">${procs.map(p=>`<label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-dp="${i}|${p.id}" ${d.processes.includes(p.id)?'checked':''}> <b>${esc(p.id)}</b> ${esc(p.name)}${!p.active?' <span class="chip mute">inactive</span>':''}${used[p.id]>1&&d.processes.includes(p.id)?' <span class="chip warn">also in another dept.</span>':''}</label>`).join('')}</div></div>`).join('')}
+      ${procs.filter(p=>p.active && !used[p.id]).length?`<div class="banner warn">Not in any department: ${procs.filter(p=>p.active && !used[p.id]).map(p=>esc(p.id+' '+p.name)).join(', ')}</div>`:''}
+      <div class="row"><button class="btn ghost" id="dadd">+ Add department</button><button class="btn heat" id="dsave">Save departments</button></div>`;
+    mb.querySelectorAll('[data-dn]').forEach(x=>x.oninput=()=>{ ds[+x.dataset.dn].name=x.value; });
+    mb.querySelectorAll('[data-dp]').forEach(x=>x.onchange=()=>{ const [i,pid]=x.dataset.dp.split('|'); const d=ds[+i]; d.processes=x.checked?[...new Set([...d.processes,pid])]:d.processes.filter(p=>p!==pid); draw(); });
+    mb.querySelectorAll('[data-dx]').forEach(x=>x.onclick=()=>{ ds.splice(+x.dataset.dx,1); draw(); });
+    $('#dadd').onclick=()=>{ ds.push({id:uidGen('D'), name:'New department', processes:[]}); draw(); };
+    $('#dsave').onclick=async()=>{ if(ds.some(d=>!d.name.trim())) return toast('Every department needs a name.',true);
+      await saveConfig(c=>{ c.departments=ds.map(d=>({...d, name:d.name.trim()})); }, 'Departments: '+ds.map(d=>d.name+' ('+d.processes.join(',')+')').join('; '));
+      toast('Departments saved.'); go('masters'); };
+  };
+  draw();
 }
 
 
