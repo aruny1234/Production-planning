@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Production Planning – Day-wise | AMTC Foundry</title>
-<!-- Prepared by Ajay Kumar, NPD Coordinator. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, optional Firebase Firestore. -->
+<!-- Production Planning – day-wise · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
@@ -310,8 +310,8 @@ function firstWorkDayOnOrAfter(iso, proc, holidays){ return isWorkDay(iso,proc,h
 
 /* ---------- lead time & delay ---------- */
 function matchPattern(pattern, value){
-  const p=String(pattern||'').trim(); if(!p) return true;
-  const v=String(value||'').trim().toLowerCase();
+  const p=String(pattern||'').trim().replace(/^'+/,''); if(!p) return true;
+  const v=String(value||'').trim().replace(/^'+/,'').toLowerCase();
   if(p.includes('*')){ const re=new RegExp('^'+p.toLowerCase().split('*').map(s=>s.replace(/[.+?^${}()|[\]\\]/g,'\\$&')).join('.*')+'$'); return re.test(v); }
   return p.toLowerCase()===v;
 }
@@ -826,7 +826,7 @@ function showConnectFolder(msg){
   $('#cfpick').onclick=()=>go(true);
   $('#cfcopy').onclick=async()=>{ const i=$('#cfp'); i.select(); try{ await navigator.clipboard.writeText(i.value); }catch(e){ document.execCommand('copy'); } $('#cfcopy').textContent='Copied'; };
 }
-const normUser=s=>String(s||'').trim().toLowerCase().replace(/\s+/g,'.');   // "Ajay Kumar" -> "ajay.kumar"
+const normUser=s=>String(s||'').trim().toLowerCase().replace(/\s+/g,'.');   // "Rahul Sharma" -> "rahul.sharma"
 const APP_NAME='Production Planning';
 const APP_SUB='Day-wise plan, execution & plan adherence';
 function showLogin(msg, keep){
@@ -933,8 +933,8 @@ const NAV=[
   {sep:true, roles:['Admin','Management']},
   {id:'plan', label:'Publish plan (all departments)', roles:['Admin','Management']},
   {id:'wip', label:'WIP status (all)', roles:['Admin','Management']},
-  {id:'upload', label:'Upload Synchro WIP (all)', roles:['Admin','Management']},
-  {id:'booking', label:'Upload Synchro booking (all)', roles:['Admin','Management']},
+  {id:'upload', label:'Upload Synchro WIP (all)', roles:['Admin']},
+  {id:'booking', label:'Upload Synchro booking (all)', roles:['Admin']},
   {id:'datacheck', label:'Data check (duplicates)', roles:['Admin','Management']},
   {id:'masters', label:'Masters', roles:['Admin']},
   {id:'history', label:'History & audit', roles:['Admin','Management']},
@@ -959,7 +959,7 @@ async function startApp(){
   renderNav(); go(S.view);
   if(setupNotices().some(x=>x.level==='bad')) setTimeout(openNotices,400);
 }
-const DEPT_TABS=['overview','wip','plan','exec','ht','htdash','upload','booking'];
+const DEPT_TABS=['overview','wip','plan','exec','ht','htdash','recipes','upload','booking'];
 function renderNav(){
   const html=NAV.filter(n=>n.depts || !n.roles || n.roles.includes(S.user.role)).map(n=>{
     if(n.sep) return '<div class="sep"></div>';
@@ -1132,6 +1132,23 @@ async function openPlanDays(){
   pairs.forEach((pr,i)=>{ const x=ex[i]; const has=!!(x && (x.status==='Submitted' || (x.lines||[]).some(l=>l.actualQty!==null&&l.actualQty!==undefined&&l.actualQty!==''))); (has?done:open).push(pr); });
   return {open, done};
 }
+/* delete the WIP of selected processes only (their open plan days, open carry-forward, HT loads if HT) */
+async function deleteWipProcesses(pids, forget){
+  const log=[]; let n=0;
+  for(const pid of pids){ const d=await Store.get('wipp/'+pid); n+=((d&&d.rows)||[]).length; await Store.del('wipp/'+pid); }
+  await Store.update('wip/meta', m=>{ if(!m) return m; m.pids=(m.pids||[]).filter(p=>!pids.includes(p)); if(m.procSnap) pids.forEach(p=>delete m.procSnap[p]); return m; });
+  log.push(n+' WIP line(s) of '+pids.join(', ')+' deleted');
+  const {open}=await openPlanDays(); const kill=open.filter(([d,pid])=>pids.includes(pid));
+  for(const [d,pid] of kill){ await Store.del('plan/'+d+'/'+pid); await Store.del('exec/'+d+'/'+pid); }
+  await Store.update('planidx', x=>{ x=x||{dates:{}}; kill.forEach(([d,pid])=>{ x.dates[d]=(x.dates[d]||[]).filter(q=>q!==pid); if(!x.dates[d].length) delete x.dates[d]; }); return x; });
+  for(const y of [...new Set(kill.map(([d])=>d.slice(0,4)))]) await Store.update('sum/'+y, x=>{ x=x||{d:{}}; kill.forEach(([d,pid])=>{ if(d.startsWith(y) && x.d[d]){ delete x.d[d][pid]; if(!Object.keys(x.d[d]).length) delete x.d[d]; } }); return x; });
+  log.push(kill.length+' open plan day(s) deleted');
+  const ht=htProc(); if(ht && pids.includes(ht.id)){ const nHT=(S.ht.batches||[]).length; await Store.set('ht/active',{batches:[], unplanned:[]}); await Store.set('ht/progress',{}); log.push(nHT+' HT load(s) deleted'); }
+  let nCF=0; await Store.update('cf/open', d=>{ d=d||{list:[]}; const b=d.list.length; d.list=d.list.filter(c=>!pids.includes(c.processId)); nCF=b-d.list.length; return d; }); log.push(nCF+' carry-forward(s) deleted');
+  if(forget) await Store.update('seen', d=>{ d=d||{m:{}}; Object.keys(d.m).forEach(k=>{ if(pids.some(p=>k.startsWith(p+'|'))) delete d.m[k]; }); return d; });
+  await audit('Delete WIP (selected processes)', log.join('; '));
+  await loadAll(); return log;
+}
 async function deleteWip(opt){
   opt=opt||{}; const meta=S.wipMeta; const log=[];
   if(meta){ for(const pid of (meta.pids||[])) await Store.del('wipp/'+pid); await deleteLegacyChunks(meta); await Store.del('wip/meta'); }
@@ -1210,8 +1227,8 @@ async function reverseMoves(date, moves){
 }
 
 /* ===================== UPLOAD SYNCHRO WIP ===================== */
-const canFullUpload=()=>isRole('Admin','Management') && !S.deptCtx;
-const myUploadPids=()=>(isRole('Admin','Management')? S.cfg.processes.map(p=>p.id) : (S.user.processes||[])).filter(id=>!S.deptCtx || S.deptCtx.pids.includes(id));
+const canFullUpload=()=>isRole('Admin') && !S.deptCtx;
+const myUploadPids=()=>(isRole('Admin')? S.cfg.processes.map(p=>p.id) : isRole('Management')? (S.deptCtx?S.deptCtx.pids:[]) : (S.user.processes||[])).filter(id=>!S.deptCtx || S.deptCtx.pids.includes(id));
 const areaFor=pid=>{ const p=procById(pid); return (p&&p.synchroName)||(pid+'-'+(p?p.name:'')); };
 const upTabs=t=>`<div class="tabs"><button data-ut="wip" aria-selected="${t==='wip'}">Upload Synchro WIP</button><button data-ut="book" aria-selected="${t==='book'}">Upload Synchro booking</button></div>`;
 function bindUpTabs(m){ m.querySelectorAll('[data-ut]').forEach(b=>b.onclick=()=>go(b.dataset.ut==='book'?'booking':'upload')); }
@@ -1231,17 +1248,24 @@ function vUpload(m){
   bindUpTabs(m);
   if($('#udel')) $('#udel').onclick=async()=>{
     const {open, done}=await openPlanDays(); const r=routingOn();
-    modal('Delete uploaded WIP', `<p>This deletes the uploaded WIP and everything planned on it, for <b>all stages</b>:</p>
-      <ul style="margin:0 0 10px 18px;padding:0"><li><b>${fmt(S.wip.length)}</b> WIP lines (${mt(S.wip.reduce((s,w)=>s+w.wt,0))} MT)</li>
-      <li><b>${open.length}</b> published plan day(s) without actuals (all processes)</li><li><b>${(S.ht.batches||[]).length}</b> HT furnace load(s) – planned and running</li>
-      <li><b>${S.cfOpen.length}</b> open carry-forward line(s)</li></ul>
-      <p class="small muted">${done.length} plan day(s) that already have submitted actuals are kept as history.</p>
-      <label class="small" style="display:block"><input type="checkbox" id="dfull"> <b>Full reset</b> – also delete executed days, all actuals, dashboards, stage movements and upload history (masters and users are kept)</label>
-      ${r?'<label class="small" style="display:block;margin-top:6px"><input type="checkbox" id="dforget" checked> Forget which UIDs were imported</label>':''}
+    const ps=sortedProcs().filter(p=>!p.mergedInto && (S.wip.some(w=>w.processId===p.id) || (S.deptCtx?S.deptCtx.pids.includes(p.id):true)) && (!S.deptCtx || S.deptCtx.pids.includes(p.id)));
+    const st=pid=>{ const w=S.wip.filter(x=>x.processId===pid); return {n:w.length, kg:w.reduce((s,x)=>s+x.wt,0), plans:open.filter(([d,p])=>p===pid).length, cf:S.cfOpen.filter(c=>c.processId===pid).length}; };
+    const dlg=modal('Delete uploaded WIP', `<p>Tick the process(es) whose WIP should be deleted. Their WIP lines, the plan days without actuals and their open carry-forward are removed. Days with actuals stay as history.</p>
+      <div class="tbl-wrap"><table><thead><tr><th><input type="checkbox" id="dall" aria-label="All"></th><th>Process</th><th class="r">WIP lines</th><th class="r">MT</th><th class="r">Open plan days</th><th class="r">Open CF</th></tr></thead><tbody>
+      ${ps.map(p=>{ const x=st(p.id); return `<tr><td><input type="checkbox" data-dp="${p.id}"></td><td>${esc(p.id+' '+p.name)}${p.type==='HT'?' <span class="chip heat">HT – also its furnace loads</span>':''}</td><td class="r num">${fmt(x.n)}</td><td class="r num">${mt(x.kg)}</td><td class="r num">${x.plans}</td><td class="r num">${x.cf}</td></tr>`; }).join('')}</tbody></table></div>
+      <p class="small muted" style="margin-top:6px">To remove just one file, use <b>Delete</b> next to it in “Previous uploads”.</p>
+      ${S.deptCtx?'':`<label class="small" style="display:block"><input type="checkbox" id="dfull"> <b>Full reset</b> (only with all processes ticked) – also delete executed days, all actuals, dashboards, stage movements and upload history (masters and users are kept)</label>`}
+      ${r?'<label class="small" style="display:block;margin-top:6px"><input type="checkbox" id="dforget" checked> Forget which UIDs were imported (for the ticked processes)</label>':''}
       <label class="field" style="margin-top:12px">Type DELETE to confirm<input id="dconf" autocomplete="off"></label>`,
-      [{label:'Delete',cls:'danger',fn:async d=>{ if(d.querySelector('#dconf').value.trim()!=='DELETE'){ d.querySelector('#dconf').classList.add('invalid'); return false; }
-        const log=await deleteWip({full:d.querySelector('#dfull').checked, forget:!!(d.querySelector('#dforget')&&d.querySelector('#dforget').checked)});
+      [{label:'Delete selected',cls:'danger',fn:async d=>{ const sel=[...d.querySelectorAll('[data-dp]:checked')].map(x=>x.dataset.dp);
+        if(!sel.length){ toast('Tick at least one process.',true); return false; }
+        if(d.querySelector('#dconf').value.trim()!=='DELETE'){ d.querySelector('#dconf').classList.add('invalid'); return false; }
+        const allSel=!S.deptCtx && sel.length===ps.length; const full=!!(d.querySelector('#dfull')&&d.querySelector('#dfull').checked);
+        if(full && !allSel){ toast('Full reset needs all processes ticked.',true); return false; }
+        const log=allSel? await deleteWip({full, forget:!!(d.querySelector('#dforget')&&d.querySelector('#dforget').checked)})
+                        : await deleteWipProcesses(sel, !!(d.querySelector('#dforget')&&d.querySelector('#dforget').checked));
         toast('Deleted: '+log.join(' · ')); go('upload'); }}]);
+    dlg.querySelector('#dall').onchange=e=>dlg.querySelectorAll('[data-dp]').forEach(x=>x.checked=e.target.checked);
   };
   $('#uf').onchange=async e=>{
     const f=e.target.files[0]; if(!f) return;
@@ -1258,10 +1282,7 @@ function vUpload(m){
       const run=()=>parseUploadSheet(); $('#ush').onchange=run; $('#uproc').onchange=run; run();
     }catch(err){ $('#uprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; }
   };
-  Store.get('uploads/'+E.todayISO().slice(0,4)).then(d=>{
-    const l=((d||{}).list||[]).slice().reverse().filter(u=>full||!u.pids||u.pids.some(p=>mine.includes(p)));
-    $('#uhist').innerHTML=l.length?`<div class="tbl-wrap"><table><thead><tr><th>Uploaded</th><th>Snapshot</th><th>File</th><th>Mode / process</th><th class="r">Lines</th><th class="r">MT</th><th>By</th></tr></thead><tbody>${l.map(u=>`<tr><td>${fdt(u.ts)}</td><td>${fdate(u.snapshotDate)}</td><td>${esc(u.file)}</td><td>${esc(u.mode||'Snapshot')}${u.pids?' · '+esc(u.pids.join(', ')):''}${u.stat?`<div class="small muted">fresh ${u.stat.fresh} · kept ${u.stat.kept} · removed ${u.stat.removed} · duplicates excluded ${u.stat.dupInFile}${u.stat.skippedInWip?' · already in WIP '+u.stat.skippedInWip:''}</div>`:''}</td><td class="r num">${fmt(u.rows)}</td><td class="r num">${mt(u.kg)}</td><td>${esc(u.by)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No uploads yet this year.</div>';
-  });
+  uploadHistory($('#uhist'), u=>!/booking/i.test(u.mode||''), mine, full);
 }
 function parseUploadSheet(){
   const wb=S.ui.upWb, sn=$('#ush').value; const aoa=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,raw:true,defval:null});
@@ -1359,7 +1380,7 @@ async function commitStageUpload(p, A, pids, snapDate, mode, fullFile, replanFro
     }
     const src=mode==='add'?A.fresh:A.rowsU;
     const seen=await Store.update('seen', d=>{ d=d||{m:{}}; src.forEach(x=>{ const k=E.keyOf(E.areaCode(x.area),x.uid,1); if(!d.m[k]) d.m[k]=snapDate; d.m['U:'+uidPart(k)]=snapDate; }); return d; });
-    const rows=src.map(x=>toWipRow({...x, occ:1}, seen.m, snapDate));
+    const upId=uidGen('UP'); const rows=src.map(x=>({...toWipRow({...x, occ:1}, seen.m, snapDate), upId}));
     let added=0, skippedRace=0;
     for(const pid of pids){
       const mineRows=rows.filter(r=>r.processId===pid);
@@ -1377,7 +1398,7 @@ async function commitStageUpload(p, A, pids, snapDate, mode, fullFile, replanFro
     const stat={fresh:A.fresh.length, kept:mode==='update'?A.same.length:0, skippedInWip:mode==='add'?A.same.length:0, removed:mode==='update'?A.gone.length:0, dupInFile:A.dupFile.length,
       dupUIDs:A.dupFile.slice(0,200).map(x=>E.areaCode(x.area)+' '+x.uid)};
     const label=(fullFile?'Master WIP':'Department')+' – '+(mode==='add'?'add fresh only':'update stage');
-    await Store.update('uploads/'+snapDate.slice(0,4), d=>{ d=d||{list:[]}; d.list.push({ts:new Date().toISOString(), snapshotDate:snapDate, file:p.file, rows:rows.length, kg:rows.reduce((s,x)=>s+x.wt,0), by:S.user.username, mode:label, pids, stat}); return d; });
+    await Store.update('uploads/'+snapDate.slice(0,4), d=>{ d=d||{list:[]}; d.list.push({id:upId, kind:'wip', ts:new Date().toISOString(), snapshotDate:snapDate, file:p.file, rows:rows.length, kg:rows.reduce((s,x)=>s+x.wt,0), by:S.user.username, mode:label, pids, stat}); return d; });
     await audit('Upload WIP', label+' '+pids.join(',')+': '+p.file+' – fresh '+stat.fresh+', kept '+stat.kept+', removed '+stat.removed+', duplicates in file excluded '+stat.dupInFile+(mode==='add'?', already in WIP skipped '+stat.skippedInWip:''));
     await loadAll(); await writeSnapshot(snapDate);
     let rp='';
@@ -1445,8 +1466,10 @@ function vBookUpload(m){
       <label class="field">Process (if the sheet has no process column)<select id="bp">${mine.map(id=>`<option value="${id}">${esc(id+' '+procName(id))}</option>`).join('')}</select></label>
       <span id="bsheet"></span></div>
       <p class="small muted" style="margin-bottom:0">Needed: a column with <b>UID</b>. Optional: booked / completed <b>qty</b> (else the open qty is booked), a <b>date</b> column, and a <b>process / operation</b> column (code such as 1060 or the process name).</p>
-      <div id="bprev" style="margin-top:14px"></div></div>`;
+      <div id="bprev" style="margin-top:14px"></div></div>
+    <h2>Previous booking uploads</h2><div id="bhist"></div>`;
   bindUpTabs(m);
+  uploadHistory($('#bhist'), u=>/booking/i.test(u.mode||''), mine, isRole('Admin','Management') && !S.deptCtx);
   $('#bf').onchange=async e=>{ const f=e.target.files[0]; if(!f) return;
     try{ const wb=XLSX.read(await f.arrayBuffer(),{type:'array'}); S.ui.bkWb=wb; S.ui.bkFile=f.name;
       $('#bsheet').innerHTML=`<label class="field">Sheet<select id="bsh">${wb.SheetNames.map(n=>`<option>${esc(n)}</option>`).join('')}</select></label>`;
@@ -1494,14 +1517,19 @@ async function parseBooking(){
   // UIDs already booked (any day) for this process – do not book twice
   const done={}; const xdocs=await Store.getMany(Object.keys(S.planIdx||{}).filter(d=>d>=E.addDays(E.todayISO(),-90)).flatMap(d=>pids.map(p=>'exec/'+d+'/'+p)));
   xdocs.forEach(x=>{ if(x) (x.lines||[]).forEach(l=>{ if(l.actualQty>0 && l.source && l.source!=='day') done[x.processId+'|'+normUID(l.uid)+'|'+x.date]=1; }); });
-  const matched=[], unplanned=[], notFound=[], otherProc=[], dupInFile=[], already=[]; const seen={};
+  const strict=S.ui.bkStrict!==false;      // ignore bookings dated before the plan line was published
+  const today=E.todayISO();
+  const matched=[], unplanned=[], notFound=[], otherProc=[], dupInFile=[], already=[], early=[], future=[]; const seen={};
   recs.forEach(x=>{
     if(!mine.includes(x.pid)){ otherProc.push(x); return; }
     const k=x.pid+'|'+normUID(x.uid); if(seen[k]){ dupInFile.push(x); return; } seen[k]=1;
     if(done[k+'|'+x.date]){ already.push(x); return; }
-    let need=x.qty; const cands=byUid[k]||[];
+    if(x.date>today){ future.push(x); return; }
+    let need=x.qty; const from=c=>(c.pub && c.pub<c.planDate)?c.pub:c.planDate;   // a plan counts from its publishing day (or its plan day, if it was published late)
+    const cands=(byUid[k]||[]).filter(c=>!strict || x.date>=from(c));
     if(cands.length){ for(const c of cands){ if(need!==null && need<=0) break; const take=need===null?c.remaining:Math.min(need,c.remaining); if(take<=0) continue;
         matched.push({...x, c, take}); if(need!==null) need-=take; c.remaining-=take; } return; }
+    if((byUid[k]||[]).length){ early.push({...x, c:byUid[k][0]}); return; }
     const w=wipBy[k]; if(w) unplanned.push({...x, w, take:x.qty||w.qty}); else notFound.push({...x, take:x.qty||1}); });
   S.ui.bk={matched, unplanned, notFound, pids, defDate};
   const tile=(n,l,c,id)=>`<button class="kpi" data-bl="${id}" style="text-align:left;cursor:pointer;border:1px solid var(--line)"><div class="v num ${c||''}">${fmt(n)}</div><div class="l">${l}</div></button>`;
@@ -1509,38 +1537,39 @@ async function parseBooking(){
   const chk=(grp,i,on)=>`<input type="checkbox" data-bk="${grp}:${i}" ${on?'checked':''}>`, qin=(grp,i,v)=>`<input type="number" min="1" step="1" data-bq="${grp}:${i}" value="${v}" style="width:62px">`;
   const L={
     matched:tbl(matched,[['Book',(x,i)=>chk('m',i,true)],['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Planned for',x=>fday(x.c.planDate)+(x.c.planDate<x.date?' <span class="chip warn">backlog</span>':x.c.planDate>x.date?' <span class="chip blue">ahead</span>':'')],['Booked on',x=>fdate(x.date)],['Qty',(x,i)=>qin('m',i,x.take)],['Job',x=>esc(x.c.line.job)],['Description',x=>esc(descOf(x.c.line))],['Booked by',x=>esc(x.by)]]),
-    unplanned:tbl(unplanned,[['Book',(x,i)=>chk('u',i,true)],['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Booked on',x=>fdate(x.date)],['Qty',(x,i)=>qin('u',i,x.take)],['Job',x=>esc(x.w.job)],['Description',x=>esc(x.w.desc)],['Booked by',x=>esc(x.by)]]),
-    notFound:tbl(notFound,[['Book',(x,i)=>chk('n',i,false)],['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Booked on',x=>fdate(x.date)],['Qty',(x,i)=>qin('n',i,x.take)],['Job',x=>esc(x.job)],['Description',x=>esc(x.desc)],['kg (file)',x=>fmt(x.wt,1)],['Booked by',x=>esc(x.by)]]),
+    unplanned:tbl(unplanned,[['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Booked on',x=>fdate(x.date)],['Qty',x=>fmt(x.take)],['Job',x=>esc(x.w.job)],['Description',x=>esc(x.w.desc)],['Booked by',x=>esc(x.by)]]),
+    notFound:tbl(notFound,[['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Booked on',x=>fdate(x.date)],['Qty',x=>fmt(x.take)],['Job',x=>esc(x.job)],['Description',x=>esc(x.desc)],['kg (file)',x=>fmt(x.wt,1)],['Booked by',x=>esc(x.by)]]),
+    early:tbl(early,[['UID',x=>`<b>${esc(x.uid)}</b>`],['Process',x=>esc(x.pid)],['Booked on',x=>fdate(x.date)],['Planned for',x=>fday(x.c.planDate)],['Plan published',x=>fdate(x.c.pub)],['Note',()=>'booked before the plan was published / before its plan day – ignored']]),
+    future:tbl(future,[['UID',x=>esc(x.uid)],['Booked on',x=>fdate(x.date)],['Note',()=>'date in the future – ignored']]),
     already:tbl(already,[['UID',x=>esc(x.uid)],['Booked on',x=>fdate(x.date)],['Note',()=>'already booked for this day – skipped']]),
     otherProc:tbl(otherProc,[['Row',x=>x.row],['UID',x=>esc(x.uid)],['Process',x=>esc(x.pid||'?')],['Note',()=>'not your process – ignored']]),
     dup:tbl(dupInFile,[['Row',x=>x.row],['UID',x=>esc(x.uid)],['Note',()=>'same UID again in this file – ignored']])};
   const days={}; recs.forEach(x=>days[x.date]=(days[x.date]||0)+1);
   box.innerHTML=`<div class="banner info">${fmt(recs.length)} booking row(s) · ${Object.entries(days).sort().map(([d,n])=>fdate(d)+': '+n).join(' · ')} · columns used: UID “${esc(aoa[hr][cU])}”${cQ>=0?`, qty “${esc(aoa[hr][cQ])}”`:', qty = open planned qty'}${cD>=0?`, date “${esc(aoa[hr][cD])}”`:', date '+fdate(defDate)}${cBy>=0?`, booked by “${esc(aoa[hr][cBy])}”`:''}${cP>=0?`, process “${esc(aoa[hr][cP])}”`:' · process from the stage heading rows'}.</div>
-    <div class="kpis" style="margin-bottom:10px">${tile(matched.length,'Matched to planned lines','ok','matched')}${tile(unplanned.length,'In WIP but not planned','warn','unplanned')}${tile(notFound.length,'Not in WIP / plan (e.g. poured after last WIP upload)',notFound.length?'bad':'','notFound')}${tile(already.length,'Already booked – skipped','','already')}${tile(otherProc.length,'Other process – ignored','','otherProc')}${tile(dupInFile.length,'Duplicate rows – ignored','','dup')}</div>
+    <label class="small" style="display:block;margin:4px 0 8px"><input type="checkbox" id="bstrict" ${strict?'checked':''}> Ignore bookings dated <b>before the plan was published</b> (e.g. a file downloaded from the 1st of the month)</label>
+    <div class="kpis" style="margin-bottom:10px">${tile(matched.length,'Matched to the plan – will be booked','ok','matched')}${tile(unplanned.length,'Not in plan (in WIP) – discarded',unplanned.length?'warn':'','unplanned')}${tile(notFound.length,'Not in plan / WIP – discarded',notFound.length?'warn':'','notFound')}${tile(early.length,'Booked before the plan – ignored',early.length?'warn':'','early')}${tile(already.length,'Already booked – skipped','','already')}${tile(otherProc.length+future.length,'Other process / future date – ignored','','otherProc')}${tile(dupInFile.length,'Duplicate rows – ignored','','dup')}</div>
     <div id="blist"></div>
     <div class="row" style="margin-top:12px"><button class="btn heat" id="bgo">Book ticked lines</button><button class="btn ghost" id="bman">Manual entry (line by line)…</button><span class="small muted" id="bcount"></span></div>
-    <p class="small muted">Tick / untick lines and change the qty before booking. Lines “not in WIP” are unticked by default: upload the latest WIP first, or tick them to book with the weight from the booking file.</p>`;
-  const names={matched:'Matched to planned lines',unplanned:'In WIP but not planned – tonnage only',notFound:'Not in WIP / plan',already:'Already booked',otherProc:'Other process',dup:'Duplicate rows'};
+    <p class="small muted">Only castings that are in the published plan are booked – everything else in the file is discarded, so booked tonnage can never be more than the plan. Tick / untick lines and change the qty before booking.</p>`;
+  const names={matched:'Matched to the plan – will be booked',unplanned:'Not in plan (in WIP) – discarded',notFound:'Not in plan / WIP – discarded',early:'Booked before the plan was published – ignored',future:'Future booking date – ignored',already:'Already booked',otherProc:'Other process',dup:'Duplicate rows'};
+  L.otherProc=L.otherProc+(future.length?'<h3>Future booking date</h3>'+L.future:'');
   const showList=id=>{ $('#blist').innerHTML=`<h3>${names[id]}</h3>`+L[id]; bindChecks(); };
-  const state={}; [['m',matched,true],['u',unplanned,true],['n',notFound,false]].forEach(([g,arr,on])=>arr.forEach((x,i)=>{ state[g+':'+i]={on, qty:x.take}; }));
+  const state={}; [['m',matched,true]].forEach(([g,arr,on])=>arr.forEach((x,i)=>{ state[g+':'+i]={on, qty:x.take}; }));
   const count=()=>{ const n=Object.values(state).filter(v=>v.on).length; $('#bcount').textContent=n+' line(s) ticked for booking'; $('#bgo').disabled=!n; };
   const bindChecks=()=>{ $('#blist').querySelectorAll('[data-bk]').forEach(c=>{ c.checked=state[c.dataset.bk].on; c.onchange=()=>{ state[c.dataset.bk].on=c.checked; count(); }; });
     $('#blist').querySelectorAll('[data-bq]').forEach(q=>{ q.value=state[q.dataset.bq].qty; q.onchange=()=>{ state[q.dataset.bq].qty=Math.max(1,Math.round(+q.value||1)); }; }); };
   box.querySelectorAll('[data-bl]').forEach(b=>b.onclick=()=>showList(b.dataset.bl));
   showList(matched.length?'matched':unplanned.length?'unplanned':'notFound'); count();
+  $('#bstrict').onchange=e=>{ S.ui.bkStrict=e.target.checked; parseBooking(); };
   $('#bman').onclick=()=>{ S.ui.execTab='search'; S.ui.execProc=pids[0]||defPid; go('exec'); };
   $('#bgo').onclick=async()=>{ $('#bgo').disabled=true; $('#bgo').textContent='Booking…';
     try{
       const entries=[]; const rmk=x=>'Synchro booking'+(x.by?' by '+x.by:'');
       matched.forEach((x,i)=>{ const st=state['m:'+i]; if(!st.on) return; const q=Math.min(st.qty, x.c.remaining+x.take);
         entries.push({pid:x.pid, planDate:x.c.planDate, line:x.c.line, qty:q, date:x.date, remarks:rmk(x)}); });
-      unplanned.forEach((x,i)=>{ const st=state['u:'+i]; if(!st.on) return; const w=x.w;
-        entries.push({pid:x.pid, planDate:null, qty:st.qty, date:x.date, remarks:rmk(x)+' – unplanned', line:{id:null, key:w.key, uid:w.uid, job:w.job, part:w.part, die:w.die, desc:w.desc, met:w.met, cust:w.cust, unitWt:w.unitWt}}); });
-      notFound.forEach((x,i)=>{ const st=state['n:'+i]; if(!st.on) return;
-        entries.push({pid:x.pid, planDate:null, qty:st.qty, date:x.date, remarks:rmk(x)+' – not in WIP', line:{id:null, key:E.keyOf(x.pid,x.uid,1), uid:x.uid, job:x.job, part:x.part, die:x.die, desc:x.desc, met:x.met, cust:x.cust, unitWt:(x.wt||0)/(x.qty||1)}}); });
       if(!entries.length){ toast('Nothing ticked.',true); $('#bgo').disabled=false; $('#bgo').textContent='Book ticked lines'; return; }
-      const n=await bookLines(entries,'synchro');
-      await Store.update('uploads/'+E.todayISO().slice(0,4), d=>{ d=d||{list:[]}; d.list.push({ts:new Date().toISOString(), snapshotDate:defDate, file:S.ui.bkFile, rows:n, kg:entries.reduce((s,e)=>s+e.qty*(+e.line.unitWt||0),0), by:S.user.username, mode:'Synchro booking', pids}); return d; });
+      const upId=uidGen('UP'); const n=await bookLines(entries,'synchro',upId);
+      await Store.update('uploads/'+E.todayISO().slice(0,4), d=>{ d=d||{list:[]}; d.list.push({id:upId, kind:'booking', ts:new Date().toISOString(), snapshotDate:defDate, file:S.ui.bkFile, rows:n, kg:entries.reduce((s,e)=>s+e.qty*(+e.line.unitWt||0),0), by:S.user.username, mode:'Synchro booking', pids}); return d; });
       toast(n+' booking(s) saved as actuals.'); go('booking');
     }catch(e){ console.error(e); toast('Booking failed: '+e.message,true); $('#bgo').disabled=false; $('#bgo').textContent='Book ticked lines'; } };
 }
@@ -1557,6 +1586,73 @@ async function replanAfterUpload(pids, from){
     out.push(pid+': '+written.length+' day(s)'+(left>0?', '+mt(left)+' MT beyond the plan horizon':''));
   }
   return out.length?' Re-planned '+out.join(' · ')+'.':'';
+}
+
+/* ===================== upload history with "delete this upload" ===================== */
+async function uploadHistory(el, filter, mine, full){
+  const y=+E.todayISO().slice(0,4); const docs=await Store.getMany(['uploads/'+y,'uploads/'+(y-1)]);
+  const l=docs.flatMap((d,i)=>((d||{}).list||[]).map(u=>({...u, _y:i?y-1:y}))).filter(filter).filter(u=>full||!u.pids||u.pids.some(p=>mine.includes(p))).sort((a,b)=>a.ts<b.ts?1:-1);
+  const admin=isRole('Admin');
+  el.innerHTML=l.length?`<div class="tbl-wrap" style="max-height:420px"><table><thead><tr><th>Uploaded</th><th>Snapshot / booking date</th><th>File</th><th>Mode / process</th><th class="r">Lines</th><th class="r">MT</th><th>By</th>${admin?'<th></th>':''}</tr></thead><tbody>
+    ${l.map((u,i)=>`<tr style="${u.deleted?'opacity:.55;text-decoration:line-through':''}"><td>${fdt(u.ts)}</td><td>${fdate(u.snapshotDate)}</td><td>${esc(u.file||'')}</td><td>${esc(u.mode||'Snapshot')}${u.pids?' · '+esc(u.pids.join(', ')):''}${u.stat?`<div class="small muted">fresh ${u.stat.fresh} · kept ${u.stat.kept} · removed ${u.stat.removed} · duplicates excluded ${u.stat.dupInFile}${u.stat.skippedInWip?' · already in WIP '+u.stat.skippedInWip:''}</div>`:''}${u.deleted?`<div class="small" style="text-decoration:none">deleted ${fdt(u.deletedAt)} by ${esc(u.deletedBy)}</div>`:''}</td>
+      <td class="r num">${fmt(u.rows)}</td><td class="r num">${mt(u.kg)}</td><td>${esc(u.by)}</td>${admin?`<td>${u.deleted?'':`<button class="btn danger sm" data-uh="${i}">Delete</button>`}</td>`:''}</tr>`).join('')}</tbody></table></div>`
+    :'<div class="empty">No uploads yet.</div>';
+  el.querySelectorAll('[data-uh]').forEach(b=>b.onclick=()=>deleteUpload(l[+b.dataset.uh]));
+}
+async function markUploadDeleted(u, note){
+  await Store.update('uploads/'+u._y, d=>{ if(!d) return d; const e=d.list.find(x=>(u.id&&x.id===u.id)||(!u.id&&x.ts===u.ts)); if(e){ e.deleted=true; e.deletedAt=new Date().toISOString(); e.deletedBy=S.user.username; e.deleteNote=note; } return d; });
+}
+async function deleteUpload(u){
+  const isBook=/booking/i.test(u.mode||'');
+  if(isBook) return deleteBookingUpload(u);
+  // WIP upload: lines that came from this file (tagged) and were not replaced by a later upload
+  const pids=(u.pids||[]).filter(p=>procById(p)); const hit={};
+  for(const pid of pids){ const d=await Store.get('wipp/'+pid); hit[pid]=((d&&d.rows)||[]).filter(r=>u.id && r.upId===u.id); }
+  const n=Object.values(hit).reduce((s,a)=>s+a.length,0), kg=Object.values(hit).reduce((s,a)=>s+a.reduce((t,r)=>t+r.wt,0),0);
+  if(!n) return modal('Delete upload – '+esc(u.file||''),`<p>The lines of this upload cannot be identified any more – it was uploaded before this version, or a later upload of the same process replaced its lines.</p><p>To remove the WIP of a process use <b>Delete uploaded WIP</b> and tick only that process.</p>`,[]);
+  modal('Delete upload – '+esc(u.file||''),`<p>This removes <b>${fmt(n)}</b> WIP line(s) (${mt(kg)} MT) that came from <b>${esc(u.file||'')}</b> (uploaded ${fdt(u.ts)} by ${esc(u.by)}):</p>
+    <ul style="margin:0 0 10px 18px;padding:0">${pids.filter(p=>hit[p].length).map(p=>`<li>${esc(p+' '+procName(p))}: ${hit[p].length} line(s)</li>`).join('')}</ul>
+    <label class="small"><input type="checkbox" id="dupl" checked> Also take these castings out of plan days that have no actuals yet</label>
+    <p class="small muted">Other uploads, executed days, actuals and history are not changed.</p>`,
+    [{label:'Delete this upload', cls:'danger', fn:async d=>{ const alsoPlan=d.querySelector('#dupl').checked; const keys=new Set();
+      for(const pid of pids){ if(!hit[pid].length) continue; await Store.update('wipp/'+pid, x=>{ x=x||{rows:[]}; x.rows=x.rows.filter(r=>{ if(r.upId===u.id){ keys.add(r.key); return false; } return true; }); return x; }); }
+      let pl=0; if(alsoPlan) pl=await removeKeysFromOpenPlans(pids, keys);
+      await updateCF(list=>{ list.forEach(c=>{ if(keys.has(c.key) && (c.status==='Open'||c.status==='Planned')){ c.status='Closed'; c.closeNote='Upload deleted'; c.closedAt=new Date().toISOString(); } }); });
+      await markUploadDeleted(u, n+' WIP line(s) removed'); await audit('Delete upload', (u.file||'')+' ('+fdt(u.ts)+'): '+n+' WIP line(s) removed'+(pl?', '+pl+' plan line(s) removed':''));
+      await loadAll(); toast(n+' WIP line(s) of '+(u.file||'the upload')+' removed.'+(pl?' '+pl+' plan line(s) removed.':'')); go(S.view==='dept'?'upload':S.view); }}]);
+}
+async function removeKeysFromOpenPlans(pids, keys){
+  const today=E.todayISO(); let n=0; const drop=[];
+  for(const [d,ps] of Object.entries(S.planIdx||{})){ if(d<today) continue;
+    for(const pid of ps){ if(!pids.includes(pid)) continue; const x=await Store.get('exec/'+d+'/'+pid); if(x && (x.lines||[]).some(l=>!l.source||l.source==='day')) continue;
+      let empty=false; await Store.update('plan/'+d+'/'+pid, p=>{ if(!p) return p; const b=p.lines.length; p.lines=p.lines.filter(l=>!keys.has(l.key)||(l.bookings||[]).length); n+=b-p.lines.length; p.lines.forEach((l,i)=>l.prio=i+1); empty=!p.lines.length; return p; });
+      if(empty){ await Store.del('plan/'+d+'/'+pid); drop.push([d,pid]); } else await recomputeSummary(d,pid); } }
+  if(drop.length){ await Store.update('planidx', z=>{ z=z||{dates:{}}; drop.forEach(([d,pid])=>{ z.dates[d]=(z.dates[d]||[]).filter(q=>q!==pid); if(!z.dates[d].length) delete z.dates[d]; }); return z; });
+    for(const [d,pid] of drop) await Store.update('sum/'+d.slice(0,4), z=>{ if(z&&z.d[d]) delete z.d[d][pid]; return z||{d:{}}; }); }
+  return n;
+}
+async function deleteBookingUpload(u){
+  const pids=(u.pids||[]).filter(p=>procById(p)); const t0=Date.parse(u.ts);
+  const own=l=>(u.id && l.upId===u.id) || (!l.upId && l.source==='synchro' && l.bookedAt && Math.abs(Date.parse(l.bookedAt)-t0)<15*60000);
+  const dates=Object.keys(S.sums||{}).filter(d=>pids.some(p=>(S.sums[d]||{})[p]));
+  const docs=await Store.getMany(dates.flatMap(d=>pids.map(p=>'exec/'+d+'/'+p)));
+  const found=[]; docs.forEach((x,i)=>{ if(x) (x.lines||[]).forEach(l=>{ if(own(l)) found.push({...l, date:x.date, pid:x.processId}); }); });
+  if(!found.length) return modal('Delete booking upload',`<p>No booked lines of this upload were found (they may already be removed).</p>`,[]);
+  const kg=found.reduce((s,l)=>s+(+l.actualKg||0),0);
+  modal('Delete booking upload – '+esc(u.file||''),`<p>This removes <b>${fmt(found.length)}</b> booked line(s) · ${fmt(found.reduce((s,l)=>s+(+l.actualQty||0),0))} pcs · ${mt(kg)} MT booked from <b>${esc(u.file||'')}</b> (${fdt(u.ts)}, ${esc(u.by)}).</p>
+    <p>Plan adherence of their plan days and the tonnage of the booking days are recalculated. The castings become open again in their plans.</p>${routingOn()?'<p class="small" style="color:var(--bad)">Routing mode: quantities already moved to the next stage are not moved back automatically – correct them in WIP status.</p>':''}`,
+    [{label:'Delete these bookings', cls:'danger', fn:async()=>{ const touched=new Set();
+      const byDoc={}; found.forEach(l=>{ (byDoc[l.date+'|'+l.pid]=byDoc[l.date+'|'+l.pid]||[]).push(l); });
+      for(const k of Object.keys(byDoc)){ const [d,pid]=k.split('|'); let empty=false;
+        await Store.update('exec/'+d+'/'+pid, x=>{ if(!x) return x; x.lines=(x.lines||[]).filter(l=>!own(l)); empty=!x.lines.length && x.status!=='Submitted'; return x; });
+        if(empty) await Store.del('exec/'+d+'/'+pid); touched.add(d+'|'+pid); }
+      const plans={}; found.filter(l=>l.planDate).forEach(l=>{ (plans[l.planDate+'|'+l.pid]=plans[l.planDate+'|'+l.pid]||[]).push(l); });
+      for(const k of Object.keys(plans)){ const [pd,pid]=k.split('|');
+        await Store.update('plan/'+pd+'/'+pid, p=>{ if(!p) return p; p.lines.forEach(l=>{ if(!l.bookings) return; l.bookings=l.bookings.filter(b=>!((u.id&&b.upId===u.id) || (!b.upId && b.src==='synchro' && Math.abs(Date.parse(b.ts||0)-t0)<15*60000))); }); return p; });
+        touched.add(pd+'|'+pid); }
+      for(const t of touched){ const [d,p]=t.split('|'); await recomputeSummary(d,p); }
+      await markUploadDeleted(u, found.length+' booked line(s) removed'); await audit('Delete booking upload', (u.file||'')+' ('+fdt(u.ts)+'): '+found.length+' line(s), '+mt(kg)+' MT');
+      await loadAll(); toast(found.length+' booked line(s) removed.'); go(S.view==='dept'?'booking':S.view); }}]);
 }
 
 /* ===================== DAILY PLAN ===================== */
@@ -2014,11 +2110,11 @@ async function openPlanLines(pids, back=45, fwd=30){
   const docs=await Store.getMany(pairs.flatMap(([d,pid])=>['plan/'+d+'/'+pid,'exec/'+d+'/'+pid]));
   const out=[];
   pairs.forEach(([d,pid],i)=>{ const p=docs[2*i], x=docs[2*i+1]; if(!p || (x && x.status==='Submitted')) return;
-    p.lines.forEach(l=>{ const b=bookedQty(l); const rem=l.qty-b; if(rem>0) out.push({pid, planDate:d, line:l, booked:b, remaining:rem}); }); });
+    p.lines.forEach(l=>{ const b=bookedQty(l); const rem=l.qty-b; if(rem>0) out.push({pid, planDate:d, line:l, booked:b, remaining:rem, pub:(p.publishedAt||'').slice(0,10)}); }); });
   return out;
 }
 /* book actual quantities: exec line on the ACTUAL date, booking on the PLAN line, routing move, summaries for both days */
-async function bookLines(entries, src){
+async function bookLines(entries, src, upId){
   if(!entries.length) return 0;
   const now=new Date().toISOString(); const touched=new Set();
   const grp=(f)=>{ const g={}; entries.forEach(e=>{ const k=f(e); if(k) (g[k]=g[k]||[]).push(e); }); return g; };
@@ -2026,13 +2122,13 @@ async function bookLines(entries, src){
     await Store.update('exec/'+date+'/'+pid, d=>{ d=d||{date,processId:pid,status:'Open',lines:[]}; d.lines=d.lines||[];
       list.forEach(e=>{ const l=e.line, uw=+l.unitWt||0;
         d.lines.push({planLineId:l.id||null, planDate:e.planDate||null, offPlan:e.planDate!==date, source:src, key:l.key, uid:l.uid, job:l.job, part:l.part, die:toolOf(l), desc:descOf(l), met:l.met, cust:l.cust||'',
-          plannedQty:e.planDate===date?e.qty:0, plannedKg:e.planDate===date?e.qty*uw:0, unitWt:uw, actualQty:e.qty, actualKg:e.qty*uw, shortQty:0, shortKg:0, reason:'', remarks:e.remarks||'', bookedBy:S.user.username, bookedAt:now}); });
+          plannedQty:e.planDate===date?e.qty:0, plannedKg:e.planDate===date?e.qty*uw:0, unitWt:uw, actualQty:e.qty, actualKg:e.qty*uw, shortQty:0, shortKg:0, reason:'', remarks:e.remarks||'', bookedBy:S.user.username, bookedAt:now, upId:upId||null}); });
       return d; });
     touched.add(date+'|'+pid); }
   const closeCF=[];
   for(const [k,list] of Object.entries(grp(e=>e.planDate?e.planDate+'|'+e.pid:null))){ const [pd,pid]=k.split('|');
     await Store.update('plan/'+pd+'/'+pid, d=>{ if(!d) return d; list.forEach(e=>{ const l=d.lines.find(x=>x.id===e.line.id); if(!l) return;
-      (l.bookings=l.bookings||[]).push({date:e.date, qty:e.qty, kg:e.qty*(+l.unitWt||0), src, by:S.user.username, ts:now});
+      (l.bookings=l.bookings||[]).push({date:e.date, qty:e.qty, kg:e.qty*(+l.unitWt||0), src, by:S.user.username, ts:now, upId:upId||null});
       if((l.cfIds||[]).length && bookedQty(l)>=l.qty) closeCF.push({date:e.date, pid, line:{key:l.key, shortQty:0, cfIds:l.cfIds}}); }); return d; });
     touched.add(pd+'|'+pid); }
   for(const c of closeCF) await applyCarryForward(c.date, c.pid, [c.line]);
@@ -2421,6 +2517,62 @@ function metTable(htw){
   return `<div class="tbl-wrap" style="max-height:320px"><table><thead><tr><th>Metallurgy</th><th class="r">Lines</th><th class="r">MT</th><th class="r">Scheduled MT</th><th class="r">Delayed</th></tr></thead><tbody>${Object.entries(by).sort((a,b)=>b[1].kg-a[1].kg).map(([k,v])=>`<tr><td>${esc(k)}</td><td class="r num">${v.n}</td><td class="r num">${mt(v.kg)}</td><td class="r num">${mt(v.sch)}</td><td class="r num">${v.del}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
+/* ===================== HT RECIPES (Admin and HT user) ===================== */
+/* editable recipe table + Excel upload (Metallurgy | Std Cycle Time (hr) …) + download of the current recipes */
+const metKey=t=>String(t??'').trim().replace(/^'+/,'');
+function vHTRecipes(m){
+  const ht=htProc(); const hp=ht?ht.id:'1080';
+  const wipMets={}; S.wip.filter(w=>w.processId===hp).forEach(w=>{ const k=metKey(w.met); const x=wipMets[k]=wipMets[k]||{n:0,kg:0}; x.n++; x.kg+=w.wt; });
+  const active=S.cfg.recipes.filter(r=>r.status==='Active');
+  const noRec=Object.entries(wipMets).filter(([k])=>!active.some(r=>String(r.metallurgies||'').split(',').some(p=>p.trim() && E.matchPattern(p.trim(),k)))).sort((a,b)=>b[1].kg-a[1].kg);
+  m.innerHTML=head('HT recipes','Cycle time per metallurgy used for furnace loads. Upload the plant cycle list or change single recipes below; only Active recipes can be loaded to a furnace.')
+   +`<div class="panel"><div class="row" style="align-items:flex-end">
+      <label class="field">Upload recipe list (Excel: Metallurgy, Std Cycle Time (hr))<input type="file" id="rcf" accept=".xls,.xlsx,.csv"></label>
+      <button class="btn ghost" id="rcdl">Download current recipes (Excel)</button></div><div id="rcprev" style="margin-top:12px"></div></div>
+    ${noRec.length?`<div class="banner warn"><b>${noRec.length}</b> metallurgy(ies) in the HT WIP have no active recipe and cannot be loaded: ${noRec.map(([k,x])=>`<b>${esc(k)}</b> (${x.n} lines, ${mt(x.kg)} MT)`).join(', ')}. Add them to the list or below.</div>`:(Object.keys(wipMets).length?'<div class="banner ok">Every metallurgy in the HT WIP has an active recipe. ✔</div>':'')}
+    <h2>Recipes</h2><div id="rcmb"></div>`;
+  masterTable($('#rcmb'),'HT recipes');
+  $('#rcdl').onclick=()=>{ const rows=[]; S.cfg.recipes.forEach(r=>String(r.metallurgies||'').split(',').map(x=>x.trim()).filter(Boolean).forEach(met=>rows.push([met, E.cycleHours(r), r.id, r.name, r.status, (r.stages||[]).map(s=>s.name+':'+s.hours).join('; '), r.maxBatchKg, (r.furnaces||[]).join(','), r.sequence||1])));
+    xlsxDownload('HT recipes '+E.todayISO(), ['Metallurgy','Std Cycle Time (hr)','Recipe ID','Recipe name','Status','Stages','Max batch kg','Furnaces','Sequence'], rows); };
+  $('#rcf').onchange=async e=>{ const f=e.target.files[0]; if(!f) return;
+    try{ const wb=XLSX.read(await f.arrayBuffer(),{type:'array'}); const aoa=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:null});
+      const hr=aoa.findIndex((r,i)=>i<20 && r && r.some(c=>/metall/i.test(String(c||''))));
+      if(hr<0) return $('#rcprev').innerHTML='<div class="banner bad">No column “Metallurgy” found in the first sheet.</div>';
+      const H=aoa[hr].map(h=>String(h||'').toLowerCase());
+      const cM=H.findIndex(h=>/metall/.test(h)), cH=H.findIndex(h=>/cycle|hour|hr/.test(h)), cS=H.findIndex(h=>/^status/.test(h)), cB=H.findIndex(h=>/batch/.test(h)), cF=H.findIndex(h=>/furnace/.test(h)), cSt=H.findIndex(h=>/^stages/.test(h));
+      if(cH<0) return $('#rcprev').innerHTML='<div class="banner bad">No cycle-time column (e.g. “Std Cycle Time (hr)”) found.</div>';
+      const seen={}, list=[], dup=[], bad=[];
+      aoa.slice(hr+1).forEach((r,i)=>{ const met=metKey(r[cM]); if(!met) return; const h=parseFloat(r[cH]);
+        if(!(h>0)) { bad.push({met,row:hr+i+2}); return; }
+        const k=met.toLowerCase(); if(seen[k]){ dup.push({met, h, first:seen[k].h}); return; }
+        const x={met, h, status:cS>=0&&r[cS]?String(r[cS]).trim():null, batch:cB>=0?parseFloat(r[cB])||null:null, furn:cF>=0&&r[cF]?String(r[cF]).split(',').map(y=>y.trim()).filter(Boolean):null,
+          stages:cSt>=0&&r[cSt]?String(r[cSt]).split(';').map(y=>y.trim()).filter(Boolean).map(y=>{ const j=y.lastIndexOf(':'); return {name:(j>0?y.slice(0,j):y).trim(), hours:j>0?+y.slice(j+1):0}; }):null};
+        seen[k]=x; list.push(x); });
+      const own=x=>S.cfg.recipes.find(r=>String(r.metallurgies||'').split(',').map(y=>metKey(y).toLowerCase()).includes(x.met.toLowerCase()));
+      list.forEach(x=>{ const r=own(x); x.rec=r; x.action=!r?'New':(E.cycleHours(r)===x.h && r.status==='Active')?'Same':'Update'; });
+      const tbl=`<div class="tbl-wrap" style="max-height:380px"><table><thead><tr><th>Metallurgy</th><th class="r">Cycle h (file)</th><th>Now in app</th><th>Action</th><th class="r">HT WIP</th></tr></thead><tbody>
+        ${list.map(x=>{ const w=wipMets[x.met]; return `<tr><td><b>${esc(x.met)}</b></td><td class="r num">${fmt(x.h,1)}</td><td>${x.rec?esc(x.rec.id)+' · '+E.cycleHours(x.rec)+' h · '+esc(x.rec.status):'–'}</td>
+          <td><span class="chip ${x.action==='New'?'ok':x.action==='Update'?'warn':'mute'}">${x.action}</span></td><td class="r num">${w?w.n+' lines':''}</td></tr>`; }).join('')}</tbody></table></div>`;
+      $('#rcprev').innerHTML=`<div class="banner info">${list.length} metallurgy(ies) read from “${esc(f.name)}”: <b>${list.filter(x=>x.action==='New').length} new</b>, <b>${list.filter(x=>x.action==='Update').length} changed</b>, ${list.filter(x=>x.action==='Same').length} unchanged${dup.length?` · ${dup.length} duplicate row(s) ignored (${dup.map(d=>esc(d.met)+(d.h!==d.first?' '+d.h+' h ≠ '+d.first+' h':'')).join(', ')})`:''}${bad.length?` · ${bad.length} row(s) without cycle time ignored`:''}.</div>${tbl}
+        <div class="row" style="margin-top:10px"><label class="field">Status of the uploaded recipes<select id="rcst"><option value="Active" selected>Active (approved – can be loaded)</option><option value="Draft">Draft (needs approval)</option></select></label>
+        <button class="btn heat" id="rcgo">Save ${list.filter(x=>x.action!=='Same').length} recipe(s)</button></div>
+        <p class="small muted">A metallurgy that already has a recipe gets the new cycle time (one stage “Std cycle”, unless the file has a “Stages” column); max batch and furnaces stay as they are. Other recipes are not changed.</p>`;
+      $('#rcgo').onclick=async()=>{ const st=$('#rcst').value; const ts=E.todayISO(); let nN=0,nU=0;
+        await saveConfig(c=>{ list.forEach(x=>{ if(x.action==='Same') return;
+          const stages=x.stages&&x.stages.length?x.stages:[{name:'Std cycle', hours:x.h}];
+          const r=c.recipes.find(y=>String(y.metallurgies||'').split(',').map(z=>metKey(z).toLowerCase()).includes(x.met.toLowerCase()));
+          if(r){ const mets=String(r.metallurgies).split(',').map(z=>z.trim()).filter(Boolean);
+            if(mets.length>1){ r.metallurgies=mets.filter(z=>metKey(z).toLowerCase()!==x.met.toLowerCase()).join(', '); }   // split it off into its own recipe
+            else { r.stages=stages; r.status=x.status||st; if(x.batch) r.maxBatchKg=x.batch; if(x.furn) r.furnaces=x.furn; r.remarks='Cycle '+x.h+' h from '+f.name+' ('+ts+')'; nU++; return; } }
+          c.recipes.push({id:'R-'+x.met.toUpperCase().replace(/[^A-Z0-9]+/g,'-').slice(0,18), name:x.met+' heat treatment', metallurgies:x.met, process:'Heat treatment', stages,
+            maxBatchKg:x.batch||Math.max(...(c.furnaces||[]).map(fu=>+fu.capacityKg||0),2500), furnaces:x.furn||(c.furnaces||[]).map(fu=>fu.id), sequence:1, status:x.status||st, remarks:'Cycle '+x.h+' h from '+f.name+' ('+ts+')'}); nN++; });
+          // recipe IDs must stay unique
+          const ids={}; c.recipes.forEach(r=>{ let id=r.id, k=2; while(ids[id]) id=r.id+'-'+(k++); r.id=id; ids[id]=1; });
+        }, 'HT recipes uploaded from '+f.name);
+        derive(); toast(`Recipes saved: ${nN} new, ${nU} updated.`); go(S.view==='dept'?'recipes':'ht'); };
+    }catch(err){ $('#rcprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; } };
+}
+
 /* ===================== MANAGEMENT DASHBOARD ===================== */
 function rangeFor(kind, anchor){
   if(kind==='Day') return [anchor,anchor];
@@ -2628,7 +2780,7 @@ async function vDept(m){
   const hasHT=pids.some(id=>procById(id).type==='HT'), hasNormal=pids.some(id=>procById(id).type!=='HT');
   const tabs=[['overview','Overview'],['wip','WIP status'],['plan','Day plan'],
     hasNormal && isRole('Admin','Department User')?['exec','Execution entry']:null,
-    hasHT?['ht','Furnace loads']:null, hasHT?['htdash','HT dashboard']:null,
+    hasHT?['ht','Furnace loads']:null, hasHT?['htdash','HT dashboard']:null, hasHT && isRole('Admin','HT User')?['recipes','HT recipes']:null,
     ['upload','Upload Synchro WIP'],['booking','Upload Synchro booking']].filter(Boolean);
   let tab=S.ui.deptTab; if(!tabs.some(t=>t[0]===tab)) tab='overview'; S.ui.deptTab=tab;
   m.innerHTML=`<div class="dhead"><h1 style="margin:0 12px 0 0">${esc(dep.name)}</h1>${pids.map(id=>`<span class="chip mute">${esc(id+' '+procName(id))}</span>`).join('')}</div>
@@ -2636,7 +2788,7 @@ async function vDept(m){
   m.querySelectorAll('[data-dt]').forEach(b=>b.onclick=()=>{ S.ui.deptTab=b.dataset.dt; go('dept'); });
   if(!pids.length){ $('#dsub').innerHTML='<div class="empty">No active process in this department.</div>'; return; }
   const sub=$('#dsub');
-  const fn={overview:vDeptOverview, wip:vWip, plan:vPlan, exec:vExec, ht:vHT, htdash:vHTDash, upload:x=>{ S.ui.upTab='wip'; return vUpload(x); }, booking:x=>{ S.ui.upTab='book'; return vUpload(x); }}[tab];
+  const fn={overview:vDeptOverview, wip:vWip, plan:vPlan, exec:vExec, ht:vHT, htdash:vHTDash, recipes:vHTRecipes, upload:x=>{ S.ui.upTab='wip'; return vUpload(x); }, booking:x=>{ S.ui.upTab='book'; return vUpload(x); }}[tab];
   await fn(sub);
 }
 function vDeptOverview(m){
@@ -2744,6 +2896,7 @@ function vMasters(m){
   if(tab==='Departments') return vDepts(mb);
   if(tab==='Routing') return vRouting(mb);
   if(tab==='Holidays') return vHolidays(mb);
+  if(tab==='HT recipes') return vHTRecipes(mb);
   if(tab==='Reasons'){
     mb.innerHTML=`<div class="panel"><p class="small muted">One shortfall reason per line. These appear in the execution screens and the Pareto.</p><textarea id="rsn" rows="14" style="width:100%">${esc(S.cfg.reasons.join('\n'))}</textarea><div class="row" style="margin-top:10px"><button class="btn" id="rsave">Save reasons</button></div></div>`;
     $('#rsave').onclick=async()=>{ const l=$('#rsn').value.split('\n').map(x=>x.trim()).filter(Boolean); await saveConfig(c=>{ c.reasons=l; },'Shortfall reasons ('+l.length+')'); toast('Reasons saved.'); };
@@ -2756,6 +2909,9 @@ function vMasters(m){
     $('#ssave').onclick=async()=>{ await saveConfig(c=>{ F.forEach(([k,l,t])=>{ const v=$('#s_'+k).value; c.settings[k]=t==='num'?+v:v; }); },'Settings'); await loadAll(); toast('Settings saved.'); go('masters'); };
     return;
   }
+  return masterTable(mb, tab);
+}
+function masterTable(mb, tab){
   const M=MASTERS[tab]; let rows=JSON.parse(JSON.stringify(S.cfg[M.key]||[]));
   const hidden=tab==='Processes'? rows.filter(r=>r.mergedInto) : []; if(hidden.length) rows=rows.filter(r=>!r.mergedInto);
   const cols=M.cols.map(c=>c.o && typeof c.o==='function'?{...c,o:c.o()}:c);
@@ -2770,7 +2926,7 @@ function vMasters(m){
       if(tab==='Users' && !S.cfg.users.some(u=>u.username===S.user.username)){ sessionStorage.removeItem('wipUser'); if(Store.mode==='firebase') await Store.auth.signOut(); return showLogin('Your own user was removed.'); }
       S.user=S.cfg.users.find(u=>u.username===S.user.username)||S.user; derive();
       if(tab==='Lead times' && S.wipMeta) await writeSnapshot(S.wipMeta.snapshotDate);   // refresh today's delayed-WIP point
-      toast(tab+' saved.'); go('masters'); }; };
+      toast(tab+' saved.'); go(S.view==='dept'?'recipes':'masters'); }; };
   render(rows);
 }
 async function saveUsers(rows){
