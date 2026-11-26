@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Production Planning – Day-wise | AMTC Foundry</title>
-<!-- Production Planning – day-wise · Release 1.0.1 (26-Nov-2026: login hint without default password) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
+<!-- Production Planning – day-wise · Release 1.1 (26-Nov-2026: vendor master + vendor-wise planning and challan lists for Rough Machining / Finish Fettling) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
@@ -992,7 +992,7 @@ async function startApp(){
   renderNav(); go(S.view);
   if(setupNotices().some(x=>x.level==='bad')) setTimeout(openNotices,400);
 }
-const DEPT_TABS=['overview','wip','plan','exec','ht','htdash','recipes','upload','booking'];
+const DEPT_TABS=['overview','wip','plan','exec','ht','htdash','recipes','vendors','upload','booking'];
 function renderNav(){
   const html=NAV.filter(n=>n.depts || !n.roles || n.roles.includes(S.user.role)).map(n=>{
     if(n.sep) return '<div class="sep"></div>';
@@ -2044,7 +2044,8 @@ async function vExec(m){
   m.querySelectorAll('[data-et]').forEach(b=>b.onclick=()=>{ S.ui.execTab=b.dataset.et; go('exec'); });
   if(tab==='search') return execSearch(pid);
   bindDayNav(m, date, d=>{ S.ui.execDate=d; go('exec'); });
-  const [plan, ex]=await Store.getMany(['plan/'+date+'/'+pid,'exec/'+date+'/'+pid]);
+  const [plan, ex, vend]=await Store.getMany(['plan/'+date+'/'+pid,'exec/'+date+'/'+pid, vendorPids().includes(pid)?'vend/'+pid:'none/x']);
+  const VA=(vend&&vend.m)||{};
   const xl=(ex&&ex.lines)||[];
   const offLines=xl.filter(l=>l.source && l.source!=='day');        // booked on this date via search / Synchro
   const offHtml=offLines.length?`<h2>Also booked on ${fdate(date)} (${offLines.length})</h2><div class="tbl-wrap" style="max-height:260px"><table><thead><tr><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Planned for</th><th class="r">Actual qty</th><th class="r">kg</th><th>Booked via</th><th>By</th></tr></thead><tbody>
@@ -2060,7 +2061,8 @@ async function vExec(m){
   const rows=info.map((r,i)=>{ const l=r.l, x=r.x; const a=x.actualQty??'';
     const bookedTxt=r.other.length?`<div class="small" style="color:var(--ok)">✔ booked ${r.other.map(b=>fdate(b.date)+' ×'+b.qty).join(', ')}</div>`:'';
     const closed=r.rem<=0;
-    return `<tr data-i="${i}" ${closed?'style="background:#F3FAF5"':''}><td><b>${esc(l.uid)}</b>${bookedTxt}</td><td>${esc(l.job)}</td><td>${esc(toolOf(l))}</td><td class="wrap">${esc(descOf(l))}</td><td>${esc(l.met)}</td>
+    const va=VA[normUID(l.uid)]; const vTxt=va?`<div><span class="chip blue">${esc(vName(va.v)||'vendor')}</span></div>`:'';
+    return `<tr data-i="${i}" ${closed?'style="background:#F3FAF5"':''}><td><b>${esc(l.uid)}</b>${vTxt}${bookedTxt}</td><td>${esc(l.job)}</td><td>${esc(toolOf(l))}</td><td class="wrap">${esc(descOf(l))}</td><td>${esc(l.met)}</td>
       <td><span class="chip ${l.group===0?'heat':l.group===1?'bad':'mute'}">${esc(l.groupLabel)}</span></td>
       <td class="r num">${fmt(l.qty)}</td><td class="r num">${fmt(l.kg,1)}</td>
       <td>${closed?'<span class="chip ok">Done</span>':`<input type="number" min="0" max="${r.rem}" step="1" class="act" value="${a}" ${submitted?'disabled':''} placeholder="${r.rem<l.qty?'open '+r.rem:''}" aria-label="Actual qty for ${esc(l.uid)}" style="width:80px">`}</td>
@@ -2731,6 +2733,7 @@ async function vDept(m){
   const tabs=[['overview','Overview'],['wip','WIP status'],['plan','Day plan'],
     hasNormal && isRole('Admin','Department User')?['exec','Execution entry']:null,
     hasHT?['ht','Furnace loads']:null, hasHT?['htdash','HT dashboard']:null, hasHT && isRole('Admin','HT User')?['recipes','HT recipes']:null,
+    pids.some(id=>vendorPids().includes(id))?['vendors','Vendor planning']:null,
     ['upload','Upload Synchro WIP'],['booking','Upload Synchro booking']].filter(Boolean);
   let tab=S.ui.deptTab; if(!tabs.some(t=>t[0]===tab)) tab='overview'; S.ui.deptTab=tab;
   m.innerHTML=`<div class="dhead"><h1 style="margin:0 12px 0 0">${esc(dep.name)}</h1>${pids.map(id=>`<span class="chip mute">${esc(id+' '+procName(id))}</span>`).join('')}</div>
@@ -2738,7 +2741,7 @@ async function vDept(m){
   m.querySelectorAll('[data-dt]').forEach(b=>b.onclick=()=>{ S.ui.deptTab=b.dataset.dt; go('dept'); });
   if(!pids.length){ $('#dsub').innerHTML='<div class="empty">No active process in this department.</div>'; return; }
   const sub=$('#dsub');
-  const fn={overview:vDeptOverview, wip:vWip, plan:vPlan, exec:vExec, ht:vHT, htdash:vHTDash, recipes:vHTRecipes, upload:x=>{ S.ui.upTab='wip'; return vUpload(x); }, booking:x=>{ S.ui.upTab='book'; return vUpload(x); }}[tab];
+  const fn={overview:vDeptOverview, wip:vWip, plan:vPlan, exec:vExec, ht:vHT, htdash:vHTDash, recipes:vHTRecipes, vendors:vVendorPlan, upload:x=>{ S.ui.upTab='wip'; return vUpload(x); }, booking:x=>{ S.ui.upTab='book'; return vUpload(x); }}[tab];
   await fn(sub);
 }
 async function vDeptOverview(m){
@@ -2801,7 +2804,7 @@ const MASTERS={
 function vMasters(m){
   const tab=S.ui.mTab||'Processes';
   m.innerHTML=head('Masters','Configuration used by the planning engine. Every save is recorded in the audit trail.')+setupBanners()
-    +`<div class="tabs" role="tablist">${['Departments','Processes','Lead times','Routing','HT recipes','Furnaces','Holidays','Users','Reasons','Settings'].map(t=>`<button role="tab" aria-selected="${t===tab}" data-t="${t}">${t}</button>`).join('')}</div><div id="mb"></div>`;
+    +`<div class="tabs" role="tablist">${['Departments','Processes','Lead times','Routing','HT recipes','Furnaces','Vendors','Holidays','Users','Reasons','Settings'].map(t=>`<button role="tab" aria-selected="${t===tab}" data-t="${t}">${t}</button>`).join('')}</div><div id="mb"></div>`;
   m.querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{ S.ui.mTab=b.dataset.t; go('masters'); });
   const mb=$('#mb');
   if(tab==='Lead times') return vLeadTimes(mb);
@@ -2809,6 +2812,7 @@ function vMasters(m){
   if(tab==='Departments') return vDepts(mb);
   if(tab==='Routing') return vRouting(mb);
   if(tab==='Holidays') return vHolidays(mb);
+  if(tab==='Vendors') return vVendors(mb);
   if(tab==='HT recipes') return vHTRecipes(mb);
   if(tab==='Reasons'){
     mb.innerHTML=`<div class="panel"><p class="small muted">One shortfall reason per line. These appear in the execution screens and the Pareto.</p><textarea id="rsn" rows="14" style="width:100%">${esc(S.cfg.reasons.join('\n'))}</textarea><div class="row" style="margin-top:10px"><button class="btn" id="rsave">Save reasons</button></div></div>`;
@@ -3579,6 +3583,139 @@ function trendView(el, pidsAll, kind, anchor, from, to){
         {label:'100% of target',data:b.map(()=>100),borderColor:'#2D7A4C',borderDash:[6,4],pointRadius:0,borderWidth:1.5}]},
       options:{...base,scales:{y:{min:0,suggestedMax:120,ticks:{callback:v=>v+'%'}}}}});
   }
+}
+
+/* ===================== VENDORS – Rough Machining & Finish Fettling ===================== */
+/* Castings of these processes are handed over to vendors with a challan. Admin keeps the vendor list (Masters › Vendors);
+   the department assigns a vendor to each casting and prints one challan list per vendor. Assignments are kept per UID,
+   so they survive the next WIP upload. */
+const vendorPids=()=>(S.cfg.settings.vendorPids && S.cfg.settings.vendorPids.length? S.cfg.settings.vendorPids : ['1110','1145']).filter(id=>procById(id));
+const vendorsFor=pid=>(S.cfg.vendors||[]).filter(v=>v.active!==false && (v.pids||[]).includes(pid)).sort((a,b)=>a.name.localeCompare(b.name));
+const vName=id=>{ const v=(S.cfg.vendors||[]).find(x=>x.id===id); return v?v.name:''; };
+const vKey=s=>String(s||'').toLowerCase().replace(/^\s*m\s*\/\s*s\.?\s*/,'').replace(/[^a-z0-9]/g,'');
+
+/* ---------- Masters › Vendors (Admin) ---------- */
+function vVendors(mb){
+  const list=JSON.parse(JSON.stringify(S.cfg.vendors||[])); const vp=vendorPids();
+  const allP=sortedProcs().filter(p=>p.active && !p.mergedInto && p.type!=='HT');
+  const draw=()=>{
+    mb.innerHTML=`<p class="small muted">Vendors who receive castings with a challan. Tick the process(es) each vendor works for; capacity (MT/day) is optional and only used to show the vendor load.</p>
+      <div class="panel"><div class="row" style="align-items:flex-end">
+        <label class="field">Upload vendor list (Excel)<input type="file" id="vdf" accept=".xls,.xlsx,.csv"></label>
+        <span class="small muted">A column with the vendor / sub-contractor / party name is needed; optional: code, process or department, capacity. The vendor stage file (Sub Contractor Name) works too.</span></div><div id="vdprev" style="margin-top:10px"></div></div>
+      <div class="row" style="margin:10px 0"><b>Processes with vendor challans:</b>${allP.map(p=>`<label class="small"><input type="checkbox" data-vpp="${p.id}" ${vp.includes(p.id)?'checked':''}> ${esc(p.id+' '+p.name)}</label>`).join(' ')}</div>
+      <div class="tbl-wrap" style="max-height:520px"><table><thead><tr><th>Vendor name</th><th>Code</th>${vp.map(id=>`<th>${esc(id+' '+procName(id))}</th>`).join('')}<th class="r">Capacity MT/day</th><th>Active</th><th></th></tr></thead><tbody>
+        ${list.map((v,i)=>`<tr><td><input data-vi="${i}" data-vf="name" value="${esc(v.name)}" style="width:260px"></td><td><input data-vi="${i}" data-vf="code" value="${esc(v.code||'')}" style="width:90px"></td>
+          ${vp.map(id=>`<td><input type="checkbox" data-vi="${i}" data-vpid="${id}" ${(v.pids||[]).includes(id)?'checked':''} aria-label="${esc(v.name)} works for ${esc(id)}"></td>`).join('')}
+          <td class="r"><input type="number" min="0" step="0.1" data-vi="${i}" data-vf="capMT" value="${v.capMT??''}" style="width:80px"></td>
+          <td><input type="checkbox" data-vi="${i}" data-vf="active" ${v.active!==false?'checked':''}></td><td><button class="btn ghost sm" data-vdel="${i}">Remove</button></td></tr>`).join('')||`<tr><td colspan="${5+vp.length}" class="muted">No vendors yet – upload the vendor list or add a row.</td></tr>`}</tbody></table></div>
+      <div class="row" style="margin-top:10px"><button class="btn ghost" id="vdadd">Add vendor</button><button class="btn heat" id="vdsave">Save vendors</button><span class="small muted">${list.length} vendor(s)</span></div>`;
+    mb.querySelectorAll('[data-vf]').forEach(x=>x.onchange=()=>{ const v=list[+x.dataset.vi]; const f=x.dataset.vf; v[f]=f==='active'?x.checked:f==='capMT'?(x.value===''?null:+x.value):x.value; });
+    mb.querySelectorAll('[data-vpid]').forEach(x=>x.onchange=()=>{ const v=list[+x.dataset.vi]; v.pids=x.checked?[...new Set([...(v.pids||[]),x.dataset.vpid])]:(v.pids||[]).filter(p=>p!==x.dataset.vpid); });
+    mb.querySelectorAll('[data-vdel]').forEach(x=>x.onclick=()=>{ list.splice(+x.dataset.vdel,1); draw(); });
+    $('#vdadd').onclick=()=>{ list.push({id:uidGen('V'), name:'', code:'', pids:[...vp], capMT:null, active:true}); draw(); };
+    mb.querySelectorAll('[data-vpp]').forEach(x=>x.onchange=async()=>{ const sel=[...mb.querySelectorAll('[data-vpp]:checked')].map(y=>y.dataset.vpp);
+      await saveConfig(c=>{ c.settings.vendorPids=sel; }, 'Vendor challan processes: '+sel.join(', ')); vVendors(mb); });
+    $('#vdsave').onclick=async()=>{ const clean=list.filter(v=>String(v.name||'').trim());
+      const seen={}; for(const v of clean){ const k=vKey(v.name); if(seen[k]) return toast('Vendor “'+v.name+'” is listed twice.',true); seen[k]=1; v.name=v.name.trim(); }
+      await saveConfig(c=>{ c.vendors=clean; }, 'Vendors ('+clean.length+')'); toast('Vendors saved.'); vVendors(mb); };
+    $('#vdf').onchange=async e=>{ const f=e.target.files[0]; if(!f) return;
+      try{ const wb=XLSX.read(await f.arrayBuffer(),{type:'array'}); const aoa=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:null});
+        const hr=aoa.findIndex((r,i)=>i<30 && r && r.some(c=>/vendor|sub ?-?contractor|party|supplier|^name$/i.test(String(c||'').trim())));
+        if(hr<0) return $('#vdprev').innerHTML='<div class="banner bad">No vendor / sub-contractor / party name column found in the first sheet.</div>';
+        const H=aoa[hr].map(h=>String(h||'').trim().toLowerCase()); const fi=(...r)=>{ for(const re of r){ const i=H.findIndex(h=>re.test(h)); if(i>=0) return i; } return -1; };
+        const cN=fi(/vendor ?name|sub ?-?contractor ?name|party ?name|supplier ?name/,/vendor|sub ?-?contractor|party|supplier/,/^name$/), cC=fi(/code|vendor ?id|party ?id/), cP=fi(/process|department|operation|work/), cK=fi(/capacity|mt ?\/ ?day|tonn/);
+        const procOf=t=>{ const s=String(t||'').toLowerCase(); const o=[]; if(/machin/.test(s)) o.push('1110'); if(/fettl|finish|grind/.test(s)) o.push('1145'); (s.match(/\d{4}/g)||[]).forEach(c=>{ const m=(S.cfg.areaMap||{})[c]||c; if(procById(m)) o.push(m); }); return [...new Set(o)].filter(x=>vp.includes(x)); };
+        const rows={}; aoa.slice(hr+1).forEach(r=>{ const n=String(r[cN]??'').trim(); if(!n) return; const k=vKey(n); const x=rows[k]=rows[k]||{name:n, code:cC>=0?String(r[cC]??'').trim():'', pids:new Set(), cap:cK>=0?parseFloat(r[cK])||null:null, n:0};
+          x.n++; if(cP>=0) procOf(r[cP]).forEach(p=>x.pids.add(p)); });
+        const got=Object.values(rows).sort((a,b)=>a.name.localeCompare(b.name));
+        const exists=v=>list.find(y=>vKey(y.name)===vKey(v.name));
+        $('#vdprev').innerHTML=`<div class="banner info">${got.length} vendor(s) in “${esc(f.name)}” (${aoa.length-hr-1} rows) – ${got.filter(v=>!exists(v)).length} new, ${got.filter(v=>exists(v)).length} already in the list.${cP<0?' No process column: tick below which process the new vendors work for (you can change each vendor afterwards).':''}</div>
+          ${cP<0?`<div class="row">${vp.map(id=>`<label class="small"><input type="checkbox" data-imp="${id}" checked> ${esc(id+' '+procName(id))}</label>`).join(' ')}</div>`:''}
+          <div class="tbl-wrap" style="max-height:260px;margin-top:6px"><table><thead><tr><th>Vendor</th><th>Code</th><th>Process (file)</th><th class="r">Rows in file</th><th>Status</th></tr></thead><tbody>${got.map(v=>`<tr><td>${esc(v.name)}</td><td>${esc(v.code)}</td><td>${[...v.pids].map(esc).join(', ')}</td><td class="r num">${v.n}</td><td>${exists(v)?'<span class="chip mute">in list</span>':'<span class="chip ok">new</span>'}</td></tr>`).join('')}</tbody></table></div>
+          <button class="btn heat" id="vdimp" style="margin-top:8px">Add ${got.filter(v=>!exists(v)).length} new vendor(s) to the list</button>`;
+        $('#vdimp').onclick=()=>{ const def=[...mb.querySelectorAll('[data-imp]:checked')].map(x=>x.dataset.imp);
+          got.forEach(v=>{ const ex=exists(v); if(ex){ if(v.pids.size) ex.pids=[...new Set([...(ex.pids||[]),...v.pids])]; if(v.code&&!ex.code) ex.code=v.code; if(v.cap&&(ex.capMT===null||ex.capMT===undefined||ex.capMT==='')) ex.capMT=v.cap; return; }
+            list.push({id:uidGen('V'), name:v.name, code:v.code, pids:v.pids.size?[...v.pids]:(cP<0?def:[]), capMT:v.cap, active:true}); });
+          draw(); toast('Vendors added to the list – check them and click Save vendors.'); };
+      }catch(err){ $('#vdprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; } };
+  };
+  draw();
+}
+
+/* ---------- Department › Vendor planning ---------- */
+async function vVendorPlan(m){
+  const pids=S.deptCtx.pids.filter(id=>vendorPids().includes(id));
+  if(!pids.length){ m.innerHTML='<div class="empty">No process of this department uses vendor challans (Masters › Vendors).</div>'; return; }
+  const pid=S.ui.vpPid && pids.includes(S.ui.vpPid)? S.ui.vpPid : pids[0]; S.ui.vpPid=pid;
+  const today=E.todayISO();
+  const planDays=Object.keys(S.planIdx||{}).filter(d=>S.planIdx[d].includes(pid)).sort();
+  const date=S.ui.vpDate || planDays.find(d=>d>=today) || planDays[planDays.length-1] || today; S.ui.vpDate=date;
+  const scope=S.ui.vpScope||'plan';
+  const [assign, plan]=await Store.getMany(['vend/'+pid,'plan/'+date+'/'+pid]); const A=(assign&&assign.m)||{};
+  const vendors=vendorsFor(pid); const U=normUID;
+  const wip=S.wip.filter(w=>w.processId===pid && !w.completed);
+  const wipBy={}; wip.forEach(w=>wipBy[U(w.uid)]=w);
+  const planLines=(plan&&plan.lines)||[];
+  const rows=(scope==='plan'? planLines.map(l=>({uid:l.uid, job:l.job, part:l.part, die:toolOf(l), desc:descOf(l), met:l.met, qty:l.qty, kg:l.kg, cust:l.cust, start:l.start, prio:l.groupLabel, planned:date, loc:locOf((wipBy[U(l.uid)]||{}).area)}))
+                            : wip.map(w=>({uid:w.uid, job:w.job, part:w.part, die:w.die, desc:w.desc, met:w.met, qty:w.qty, kg:w.wt, cust:w.cust, start:w.start, prio:w.delay.status, planned:(S.planDateOf||{})[w.key]||'', loc:locOf(w.area)})))
+             .map(r=>({...r, v:(A[U(r.uid)]||{}).v||''}));
+  const filt=S.ui.vpFilter||''; const shown=rows.filter(r=>!filt || (filt==='-'?!r.v:r.v===filt));
+  // vendor load: open WIP assigned + plan of the day + booked this month
+  const mStart=today.slice(0,8)+'01'; const ex=await execLinesInRange(mStart,today,[pid]);
+  const load=vendors.map(v=>{ const w=wip.filter(x=>(A[U(x.uid)]||{}).v===v.id); const pd=planLines.filter(l=>(A[U(l.uid)]||{}).v===v.id);
+    const bk=ex.filter(l=>(A[U(l.uid)]||{}).v===v.id);
+    return {v, wl:w.length, wkg:w.reduce((s,x)=>s+x.wt,0), pl:pd.length, pkg:pd.reduce((s,l)=>s+l.kg,0), bkg:bk.reduce((s,l)=>s+(+l.actualKg||0),0), days:v.capMT?w.reduce((s,x)=>s+x.wt,0)/1000/v.capMT:null}; });
+  const un=rows.filter(r=>!r.v);
+  m.innerHTML=head('Vendor planning', `Assign a vendor to each casting of ${esc(pid+' '+procName(pid))}, then print one challan list per vendor. Vendors are kept in Masters › Vendors (Admin).`,
+     `${pids.length>1?`<div class="seg" role="group">${pids.map(id=>`<button data-vpp="${id}" aria-pressed="${id===pid}">${esc(id+' '+procName(id))}</button>`).join('')}</div>`:''}
+      <div class="seg" role="group"><button data-vps="plan" aria-pressed="${scope==='plan'}">Plan of the day</button><button data-vps="wip" aria-pressed="${scope==='wip'}">All open WIP</button></div>
+      ${scope==='plan'?`<input type="date" id="vpd" value="${date}" aria-label="Plan date">`:''}`)
+    +(vendors.length?'':`<div class="banner warn">No vendor is set up for ${esc(pid)}. ${isRole('Admin')?'Add them in Masters › Vendors (upload the vendor list).':'Ask the administrator to add the vendor list in Masters › Vendors.'}</div>`)
+    +`<div class="row" style="justify-content:space-between;margin-bottom:6px"><b>Vendors with castings</b>${vendors.length?`<button class="btn ghost sm" id="vpallv">${S.ui.vpAllV?'Show only vendors with castings':'Show all '+vendors.length+' vendors'}</button>`:''}</div>
+    <div class="pdeck">${load.filter(x=>S.ui.vpAllV || x.wl || x.pl || x.bkg).map(x=>`<div class="pcard ${x.days!==null&&x.days>5?'bad':x.wl?'ok':''}" data-vf="${x.v.id}" tabindex="0" role="button" title="Show only ${esc(x.v.name)}">
+        <div class="ph"><b>${esc(x.v.name)}</b>${x.v.code?`<span class="code">${esc(x.v.code)}</span>`:''}</div>
+        <div class="pst" style="margin-top:6px"><span>Open WIP <b class="num">${x.wl}</b> · <b class="num">${mt(x.wkg)}</b> MT</span><span>Plan ${fdate(date).slice(0,6)} <b class="num">${x.pl}</b> · <b class="num">${mt(x.pkg)}</b> MT</span>
+          <span>Booked this month <b class="num">${mt(x.bkg)}</b> MT</span><span>${x.v.capMT?`Load <b class="num" style="color:${x.days>5?'var(--bad)':x.days>3?'var(--warn)':''}">${x.days.toFixed(1)}</b> days at ${fmt(x.v.capMT,1)} MT/day`:'capacity not set'}</span></div></div>`).join('')}
+      <div class="pcard ${un.length?'warn':'ok'}" data-vf="-" tabindex="0" role="button"><div class="ph"><b>Not assigned</b></div><div class="pv num" style="color:${un.length?'var(--warn)':'var(--ok)'}">${un.length}</div><div class="small muted">${mt(un.reduce((s,r)=>s+r.kg,0))} MT ${scope==='plan'?'in this plan':'in open WIP'}</div></div></div>
+    <div class="panel" style="margin-top:12px"><div class="row" style="justify-content:space-between;flex-wrap:wrap">
+        <div class="row"><b>${shown.length}</b>&nbsp;line(s)${filt?` · filter: ${filt==='-'?'not assigned':esc(vName(filt))} <button class="btn ghost sm" id="vpclr">Show all</button>`:''}</div>
+        <div class="row"><label class="small">Assign ticked to <select id="vpbulk"><option value="">– vendor –</option>${vendors.map(v=>`<option value="${v.id}">${esc(v.name)}</option>`).join('')}<option value="__none">(remove vendor)</option></select></label><button class="btn heat sm" id="vpgo">Assign</button>
+          <button class="btn ghost sm" id="vpprint">Print challan lists</button><button class="btn ghost sm" id="vpxl">Download Excel</button></div></div>
+      ${shown.length?`<div class="tbl-wrap" style="max-height:560px;margin-top:8px"><table><thead><tr><th><input type="checkbox" id="vpall" aria-label="Tick all"></th><th>Vendor</th><th>UID</th><th>Job</th><th>Part no.</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Customer</th><th class="r">Qty</th><th class="r">kg</th><th>${scope==='plan'?'Priority':'Status'}</th><th>Planned</th><th>Location</th></tr></thead><tbody>
+        ${shown.map((r,i)=>`<tr><td><input type="checkbox" data-vt="${i}"></td><td><select data-vs="${i}" style="min-width:170px"><option value="">–</option>${vendors.map(v=>`<option value="${v.id}" ${v.id===r.v?'selected':''}>${esc(v.name)}</option>`).join('')}${r.v&&!vendors.some(v=>v.id===r.v)?`<option value="${r.v}" selected>${esc(vName(r.v)||'(removed vendor)')}</option>`:''}</select></td>
+          <td><b>${esc(r.uid)}</b></td><td>${esc(r.job)}</td><td>${esc(r.part||'')}</td><td>${esc(r.die||'')}</td><td class="wrap">${esc(r.desc||'')}</td><td>${esc(r.met||'')}</td><td>${esc(r.cust||'')}</td><td class="r num">${fmt(r.qty)}</td><td class="r num">${fmt(r.kg,1)}</td><td>${esc(r.prio||'')}</td><td>${r.planned?fdate(r.planned):''}</td><td>${r.loc==='Subcontract'?'<span class="chip blue">Subcon</span>':'In-house'}</td></tr>`).join('')}</tbody></table></div>`
+      :`<div class="empty">${scope==='plan'?'No plan for '+esc(pid)+' on '+fday(date)+' – publish the plan or switch to “All open WIP”.':'No open WIP.'}</div>`}</div>`;
+  const save=async(uids, v)=>{ const at=new Date().toISOString();
+    await Store.update('vend/'+pid, d=>{ d=d||{m:{}}; uids.forEach(u=>{ if(!v) delete d.m[U(u)]; else d.m[U(u)]={v, by:S.user.username, at}; }); return d; });
+    await audit('Vendor assignment', pid+': '+uids.length+' casting(s) → '+(v?vName(v):'no vendor')); };
+  m.querySelectorAll('[data-vpp]').forEach(b=>b.onclick=()=>{ S.ui.vpPid=b.dataset.vpp; S.ui.vpDate=null; S.ui.vpFilter=''; go('vendors'); });
+  m.querySelectorAll('[data-vps]').forEach(b=>b.onclick=()=>{ S.ui.vpScope=b.dataset.vps; go('vendors'); });
+  if($('#vpd')) $('#vpd').onchange=e=>{ S.ui.vpDate=e.target.value; go('vendors'); };
+  if($('#vpclr')) $('#vpclr').onclick=()=>{ S.ui.vpFilter=''; go('vendors'); };
+  if($('#vpallv')) $('#vpallv').onclick=()=>{ S.ui.vpAllV=!S.ui.vpAllV; go('vendors'); };
+  m.querySelectorAll('[data-vf]').forEach(c=>{ const f=()=>{ S.ui.vpFilter=S.ui.vpFilter===c.dataset.vf?'':c.dataset.vf; go('vendors'); }; c.onclick=f; c.onkeydown=e=>{ if(e.key==='Enter') f(); }; });
+  if($('#vpall')) $('#vpall').onchange=e=>m.querySelectorAll('[data-vt]').forEach(x=>x.checked=e.target.checked);
+  m.querySelectorAll('[data-vs]').forEach(s=>s.onchange=async()=>{ const r=shown[+s.dataset.vs]; await save([r.uid], s.value); toast(r.uid+' → '+(s.value?vName(s.value):'no vendor')); go('vendors'); });
+  $('#vpgo').onclick=async()=>{ const v=$('#vpbulk').value; const sel=[...m.querySelectorAll('[data-vt]:checked')].map(x=>shown[+x.dataset.vt]);
+    if(!v) return toast('Choose a vendor first.',true); if(!sel.length) return toast('Tick the castings to assign.',true);
+    await save(sel.map(r=>r.uid), v==='__none'?'':v); toast(sel.length+' casting(s) '+(v==='__none'?'unassigned':'assigned to '+vName(v))+'.'); go('vendors'); };
+  const byVendor=()=>{ const g={}; shown.filter(r=>r.v).forEach(r=>{ (g[r.v]=g[r.v]||[]).push(r); }); return g; };
+  $('#vpxl').onclick=()=>xlsxDownload('Vendor plan '+pid+' '+(scope==='plan'?date:'open WIP'), ['Vendor','UID','Job','Part no.','Tooling no.','Description','Metallurgy','Customer','Qty','kg','Planned','Location'],
+    shown.slice().sort((a,b)=>vName(a.v).localeCompare(vName(b.v))).map(r=>[vName(r.v)||'(not assigned)',r.uid,r.job,r.part||'',r.die||'',r.desc||'',r.met||'',r.cust||'',r.qty,+(+r.kg).toFixed(2),r.planned||'',r.loc]));
+  $('#vpprint').onclick=()=>{ const g=byVendor(); const ids=Object.keys(g).sort((a,b)=>vName(a).localeCompare(vName(b)));
+    if(!ids.length) return toast('No assigned castings in this list.',true);
+    const w=window.open('','_blank'); if(!w) return toast('Allow pop-ups to print.',true);
+    const plant=esc(S.cfg.settings.plantName||'AMTC Foundry');
+    w.document.write(`<html><head><title>Challan lists ${esc(pid)} ${esc(date)}</title><style>${PRINT_CSS} .pg{page-break-after:always} .pg:last-child{page-break-after:auto} table{width:100%;border-collapse:collapse} th,td{border:1px solid #777;padding:3px 5px;font-size:9pt} .sig{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:28px} .sig div{border-top:1px solid #333;padding-top:4px;font-size:9pt}</style></head><body>
+      ${ids.map(id=>{ const L=g[id]; const v=(S.cfg.vendors||[]).find(x=>x.id===id)||{};
+        return `<div class="pg"><h2 style="margin:0">Material handover to vendor – ${esc(v.name||'')}${v.code?' ('+esc(v.code)+')':''}</h2>
+          <div>${plant} · Process ${esc(pid+' '+procName(pid))} · ${scope==='plan'?'Plan of '+esc(fday(date)):'Open WIP'} · printed ${esc(fdt(new Date().toISOString()))} by ${esc(S.user.name||S.user.username)} · Challan no.: ____________</div>
+          <table style="margin-top:8px"><thead><tr><th>#</th><th>UID</th><th>Job</th><th>Part no.</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Qty</th><th>Black wt kg</th><th>Remarks</th></tr></thead><tbody>
+          ${L.map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.uid)}</td><td>${esc(r.job)}</td><td>${esc(r.part||'')}</td><td>${esc(r.die||'')}</td><td>${esc(r.desc||'')}</td><td>${esc(r.met||'')}</td><td>${fmt(r.qty)}</td><td>${fmt(r.kg,1)}</td><td></td></tr>`).join('')}
+          <tr><td colspan="7"><b>Total</b></td><td><b>${fmt(L.reduce((s,r)=>s+(+r.qty||0),0))}</b></td><td><b>${fmt(L.reduce((s,r)=>s+(+r.kg||0),0),1)}</b></td><td></td></tr></tbody></table>
+          <div class="sig"><div>Prepared by (${esc(procName(pid))})</div><div>Checked by (Store / Security)</div><div>Received by (vendor)</div></div></div>`; }).join('')}</body></html>`);
+    w.document.close(); w.focus(); w.print(); };
 }
 
 
