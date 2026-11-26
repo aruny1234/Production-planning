@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Production Planning – Day-wise | AMTC Foundry</title>
-<!-- Production Planning – day-wise · Release 1.0 (frozen 26-Nov-2026) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
+<!-- Production Planning – day-wise · Release 1.0.1 (26-Nov-2026: login hint without default password) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
@@ -871,7 +871,7 @@ function showLogin(msg, keep){
     <label class="field">User name<input id="lu" required autocapitalize="off" value="${esc((keep&&keep.u)||'')}" placeholder="e.g. ajay"></label>
     <label class="field">${fb?'Password (at least 6 characters)':'PIN'}<input id="lp" type="password" ${fb?'':'inputmode="numeric"'} required value="${esc((keep&&keep.p)||'')}"></label>
     <button class="btn" type="submit" id="lsubmit">Sign in</button>
-    ${fb?`<div class="small muted">First use: the very first sign-in creates the administrator. Suggested: user name <b>admin</b>, password <b>${DEFAULT_ADMIN_PW}</b> – change it after login in Masters › Users.</div>`:''}
+    ${fb?`<div class="small muted">Use the user name and password given by your administrator. Forgotten password? Ask the administrator.</div>`:''}
     ${Store.mode==='folder'?`<div class="small muted">Data folder: <b>${esc(Store.dir.name)}</b> · <a href="#" id="lchg">change</a></div>`:''}
     ${!fb && S.cfg.users.some(u=>u.demo)?'<div class="small muted">Trial accounts: admin, mgmt, ht, ko – PIN 1234. The administrator should change or remove them before go-live.</div>':''}
   </form></div>`;
