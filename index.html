@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Production Planning – Day-wise | AMTC Foundry</title>
-<!-- Production Planning – day-wise · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
+<!-- Production Planning – day-wise · Release 1.0 (frozen 26-Nov-2026) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
@@ -218,6 +218,23 @@ table.dwt th.c{text-align:center;border-left:1px solid var(--line)}
 .cald.off{background:#F1F3F6;cursor:default;color:#9AA4AF}
 .cald.hol{background:#FDF2F1;border-color:#E2A39D}.cald.hol b,.cald.hol span{color:#B8322A}
 .cald.today{box-shadow:inset 0 0 0 2px #D9730D}
+
+/* ---- department day-wise view ---- */
+.donut{border-radius:50%;display:grid;place-items:center;flex:none}.donut>div{width:74%;height:74%;border-radius:50%;background:#fff;display:grid;place-items:center}.donut b{font-size:20px}
+.dayhero{display:flex;flex-wrap:wrap;gap:18px;justify-content:space-between;align-items:center;margin-top:12px;background:var(--surface,#fff);border:1px solid var(--line);border-radius:14px;padding:16px 20px}
+.dayhero .dhl{display:flex;gap:18px;align-items:center}.dayhero .donut b{font-size:28px}.dhv{font-size:40px;font-weight:700;line-height:1.05}
+.dhk{display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:8px 18px}.dhk span{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}.dhk b{font-size:18px}
+.daycard{--rag:#8A96A3;background:var(--surface,#fff);border:1px solid var(--line);border-top:5px solid var(--rag);border-radius:12px;padding:12px 14px;cursor:pointer}
+.daycard.ok{--rag:#2D7A4C}.daycard.warn{--rag:#C28100}.daycard.bad{--rag:#B8322A}.daycard:hover{box-shadow:0 6px 16px rgba(20,30,40,.10)}
+.daycard .ph{display:flex;gap:8px;align-items:center}.daycard .ph .code{font-size:11px;background:#EEF2F6;border-radius:6px;padding:1px 6px;color:var(--muted)}
+.dcrow{display:flex;gap:14px;align-items:center;margin-top:10px}.dcst{display:grid;gap:3px;font-size:12px;flex:1}.dcst div{display:flex;justify-content:space-between;gap:8px}.dcst span{color:var(--muted)}
+.hmgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin-top:10px}
+.hm{all:unset;box-sizing:border-box;cursor:pointer;border:1px solid var(--line);border-radius:9px;min-height:58px;padding:4px 6px;display:flex;flex-direction:column;background:#fff}
+.hm .hd{font-size:11px;color:var(--muted)}.hm b{font-size:14px;margin-top:2px}.hm small{font-size:10px;color:var(--muted)}
+.hm.off{background:#F1F3F6}.hm.sel{box-shadow:inset 0 0 0 2px #D9730D}.hm:hover{box-shadow:0 2px 8px rgba(20,30,40,.12)}
+.badge{display:inline-block;color:#fff;border-radius:999px;padding:1px 8px;font-size:12px;font-weight:600}
+tr.selrow{background:#FFF4E8}
+.trhead{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:18px}
 
 </style>
 <script src="lib/chart.umd.min.js"></script>
@@ -564,8 +581,17 @@ const Store={
   async get(p){
     if(this.mode==='folder') return this.fread(this.id(p)+'.json');
     if(this.mode==='local'){ try{ const s=localStorage.getItem(LS_PREFIX+p); return s?JSON.parse(s):null; }catch(e){ return null; } }
-    const d=await this.db.collection(COLLECTION).doc(this.id(p)).get(); return d.exists?d.data():null;
+    const d=await this.db.collection(COLLECTION).doc(this.id(p)).get(); if(!d.exists) return null;
+    const v=d.data(); return v && v.__chunks ? this.joinChunks(this.id(p), v.__chunks) : v;
   },
+  /* Firestore documents are limited to 1 MB: large data (e.g. WIP of a big stage, a year of summaries)
+     is stored as numbered part documents  <id>~0, <id>~1 …  and joined again when read */
+  CHUNK:450000,          // characters per part – leaves room for multi-byte characters within the 1 MB limit
+  async joinChunks(id, n, t){ const col=this.db.collection(COLLECTION); const refs=[...Array(n).keys()].map(i=>col.doc(id+'~'+i));
+    const snaps=t? await Promise.all(refs.map(r=>t.get(r))) : await Promise.all(refs.map(r=>r.get()));
+    return JSON.parse(snaps.map(x=>x.exists?x.data().s:'').join('')); },
+  chunkWrites(id, v){ const js=JSON.stringify(v); if(js.length<=this.CHUNK) return null; const parts=[]; for(let i=0;i<js.length;i+=this.CHUNK) parts.push(js.slice(i,i+this.CHUNK));
+    return {main:{__chunks:parts.length, __bytes:js.length, __at:new Date().toISOString()}, parts}; },
   async set(p,v){
     if(this.mode==='folder'){ const n=this.id(p)+'.json'; const ln=await this.lock(n); try{ await this.fwrite(n,this.clean(v)); } finally{ await this.unlock(ln); } return; }
     if(this.mode==='local'){
@@ -573,16 +599,23 @@ const Store={
       catch(e){ throw new Error('Browser storage is full. Trial mode keeps data in this browser only (about 5 MB). Use the network folder or Firebase for real use.'); }
       return;
     }
-    await this.db.collection(COLLECTION).doc(this.id(p)).set(this.clean(v));
+    const id=this.id(p), col=this.db.collection(COLLECTION), c=this.clean(v), ch=this.chunkWrites(id,c);
+    if(!ch){ await col.doc(id).set(c); return; }
+    const b=this.db.batch(); ch.parts.forEach((x,i)=>b.set(col.doc(id+'~'+i),{s:x})); b.set(col.doc(id),ch.main); await b.commit();
   },
   async del(p){
     if(this.mode==='folder'){ try{ await this.dir.removeEntry(this.id(p)+'.json'); }catch(e){} return; }
-    if(this.mode==='local'){ localStorage.removeItem(LS_PREFIX+p); return; } await this.db.collection(COLLECTION).doc(this.id(p)).delete(); },
+    if(this.mode==='local'){ localStorage.removeItem(LS_PREFIX+p); return; }
+    const id=this.id(p), col=this.db.collection(COLLECTION), d=await col.doc(id).get(); const n=d.exists&&d.data()&&d.data().__chunks||0;
+    for(let i=0;i<n;i++) await col.doc(id+'~'+i).delete(); await col.doc(id).delete(); },
   async update(p,fn){        // read-modify-write; locked in folder mode, a transaction in Firebase, so parallel users never overwrite each other
     if(this.mode==='folder'){ const n=this.id(p)+'.json'; const ln=await this.lock(n); try{ const v=this.clean(fn(await this.fread(n))); await this.fwrite(n,v); return v; } finally{ await this.unlock(ln); } }
     if(this.mode==='local'){ const v=fn(await this.get(p)); await this.set(p,v); return v; }
-    const ref=this.db.collection(COLLECTION).doc(this.id(p)); let out;
-    await this.db.runTransaction(async t=>{ const s=await t.get(ref); out=this.clean(fn(s.exists?s.data():null)); t.set(ref,out); });
+    const id=this.id(p), col=this.db.collection(COLLECTION), ref=col.doc(id); let out;
+    await this.db.runTransaction(async t=>{ const s=await t.get(ref); let cur=s.exists?s.data():null;
+      if(cur && cur.__chunks) cur=await this.joinChunks(id, cur.__chunks, t);
+      out=this.clean(fn(cur)); const ch=this.chunkWrites(id,out);
+      if(!ch) t.set(ref,out); else { ch.parts.forEach((x,i)=>t.set(col.doc(id+'~'+i),{s:x})); t.set(ref,ch.main); } });
     return out;
   },
   async getMany(paths){ if(this.mode==='folder'){ const out=[]; for(let i=0;i<paths.length;i+=12) out.push(...await Promise.all(paths.slice(i,i+12).map(p=>this.get(p)))); return out; } return Promise.all(paths.map(p=>this.get(p))); }
@@ -1396,7 +1429,7 @@ async function commitStageUpload(p, A, pids, snapDate, mode, fullFile, replanFro
     if(mode==='update'){ const keep=new Set(rows.map(r=>r.processId+'|'+normUID(r.uid)));
       await updateCF(list=>{ list.filter(c=>pids.includes(c.processId) && !keep.has(c.processId+'|'+normUID(c.uid))).forEach(c=>{ c.status='Closed'; c.closeNote='Left stage in Synchro ('+snapDate+')'; c.closedAt=new Date().toISOString(); }); }); }
     const stat={fresh:A.fresh.length, kept:mode==='update'?A.same.length:0, skippedInWip:mode==='add'?A.same.length:0, removed:mode==='update'?A.gone.length:0, dupInFile:A.dupFile.length,
-      dupUIDs:A.dupFile.slice(0,200).map(x=>E.areaCode(x.area)+' '+x.uid)};
+      dupUIDs:A.dupFile.slice(0,50).map(x=>E.areaCode(x.area)+' '+x.uid)};
     const label=(fullFile?'Master WIP':'Department')+' – '+(mode==='add'?'add fresh only':'update stage');
     await Store.update('uploads/'+snapDate.slice(0,4), d=>{ d=d||{list:[]}; d.list.push({id:upId, kind:'wip', ts:new Date().toISOString(), snapshotDate:snapDate, file:p.file, rows:rows.length, kg:rows.reduce((s,x)=>s+x.wt,0), by:S.user.username, mode:label, pids, stat}); return d; });
     await audit('Upload WIP', label+' '+pids.join(',')+': '+p.file+' – fresh '+stat.fresh+', kept '+stat.kept+', removed '+stat.removed+', duplicates in file excluded '+stat.dupInFile+(mode==='add'?', already in WIP skipped '+stat.skippedInWip:''));
@@ -2597,89 +2630,6 @@ const dcard=(label,value,sub,rag,barPct,big,rep)=>`<div class="dcard ${rag||''} 
 function chartDays(kind,from,to,anchor){ if((kind==='Week'||kind==='Month'||kind==='Custom') && Math.round((Date.parse(to)-Date.parse(from))/864e5)<=62){ const o=[]; for(let d=from; d<=to; d=E.addDays(d,1)) o.push(d); return o; }
   return [...Array(30).keys()].map(i=>E.addDays(anchor,i-29)); }
 async function vDashboard(m){ return plantDash(m,{pids:sortedProcs().filter(p=>p.active).map(p=>p.id), plant:true, title:'Plant review – all departments'}); }
-async function vProcessDash(m){
-  const anchor=S.ui.dAnchor||E.todayISO(); const kind=S.ui.dKind||'Month'; const pid=S.ui.dProc||'';
-  const [from,to]=rangeFor(kind,anchor); const A=agg(from,to,pid);
-  const wipF=S.wip.filter(w=>!pid||w.processId===pid);
-  const del=wipF.filter(w=>w.delay.status==='Delayed'); const cf=S.cfOpen.filter(c=>!pid||c.processId===pid);
-  const bookPct=A.pkg?100*A.akg/A.pkg:null;
-  m.innerHTML=head('Management dashboard',`${fdate(from)} to ${fdate(to)}${pid?' · '+esc(pid+' '+procName(pid)):' · all processes'} · WIP snapshot ${S.wipMeta?fdate(S.wipMeta.snapshotDate):'not loaded'} · <span class="legend"><i class="ok"></i>≥ ${ragG()}% <i class="warn"></i>${ragA()}–${ragG()}% <i class="bad"></i>&lt; ${ragA()}%</span>`,
-    `<div class="seg" role="group">${['Day','Week','Month','Year','Custom'].map(k=>`<button data-k="${k}" aria-pressed="${k===kind}">${k}</button>`).join('')}</div>
-     ${kind==='Custom'?`<input type="date" id="df" value="${from}"><input type="date" id="dt" value="${to}">`:`<input type="date" id="da" value="${anchor}" aria-label="Date">`}
-     <select id="dp"><option value="">All processes</option>${sortedProcs().filter(p=>p.active).map(p=>`<option value="${p.id}" ${p.id===pid?'selected':''}>${esc(p.id+' '+p.name)}</option>`).join('')}</select>`)
-   +`<div class="deck">
-      ${dcard('Plan adherence', pctTxt(A.adq), A.pqC?`${fmt(A.aqC)} of ${fmt(A.pqC)} planned pcs done${A.pending?' · '+A.pending+' plan(s) still open':''}`:'no closed plan days yet', ragClass(A.adq), A.adq, true)}
-      ${dcard('Booked tonnage', mt(A.akg)+' <small>MT</small>', `planned ${mt(A.pkg)} MT · ${pctTxt(bookPct)} of plan`, ragClass(bookPct), bookPct, true)}
-      ${dcard('Capacity utilisation', pctTxt(A.util), `booked MT vs capacity of closed days`, ragClass(A.util), A.util, true)}
-      ${dcard('Delayed WIP', fmt(del.length)+' <small>lines</small>', `${mt(del.reduce((s,w)=>s+w.wt,0))} MT past lead time`, del.length?'bad':'ok', null, true)}
-    </div>
-    <div class="deck small4">
-      ${dcard('Weight adherence', pctTxt(A.adw), 'planned MT done by plan day', ragClass(A.adw))}
-      ${dcard('From other plan days', mt(A.offkg)+' <small>MT</small>', fmt(A.offq)+' pcs booked early / late / unplanned', 'info')}
-      ${dcard('Shortfall', mt(A.skg)+' <small>MT</small>', fmt(A.sq)+' pcs not done on plan day', A.sq?'bad':'ok')}
-      ${dcard('Carry-forward open', fmt(cf.reduce((s,c)=>s+c.qty,0))+' <small>pcs</small>', mt(cf.reduce((s,c)=>s+c.kg,0))+' MT waiting', cf.length?'warn':'ok')}
-      ${dcard('WIP in stages', mt(wipF.reduce((s,w)=>s+w.wt,0))+' <small>MT</small>', fmt(wipF.length)+' lines', 'info')}
-    </div>
-    <h2>Process cards</h2>
-    <div class="pdeck">${sortedProcs().filter(p=>p.active && (!pid||p.id===pid)).map(p=>{ const a=agg(from,to,p.id); const w=wipFor(p.id); const dl=w.filter(x=>x.delay.status==='Delayed');
-      const bp=a.pkg?100*a.akg/a.pkg:null;
-      return `<div class="pcard ${ragClass(a.adq)}" data-p="${p.id}" tabindex="0" role="button" aria-label="Show ${esc(p.name)} only">
-        <div class="ph"><span class="code">${esc(p.id)}</span><b>${esc(p.name)}</b>${p.type==='HT'?'<span class="chip heat">HT</span>':''}</div>
-        <div class="pv num" style="color:${ragColor(a.adq)}">${pctTxt(a.adq)}</div><div class="small muted">plan adherence</div>
-        <div class="pbar"><i style="width:${Math.min(100,bp||0)}%;background:${ragColor(bp)}"></i></div>
-        <div class="pst"><span>Plan <b class="num">${mt(a.pkg)}</b> MT</span><span>Booked <b class="num" style="color:${ragColor(bp)}">${mt(a.akg)}</b> MT</span>
-          <span>WIP <b class="num">${mt(w.reduce((s,x)=>s+x.wt,0))}</b> MT</span><span>Delayed <b class="num" style="color:${dl.length?'var(--bad)':'var(--ok)'}">${dl.length}</b> lines</span></div>
-        <canvas class="spark" id="sp${p.id}" height="38" aria-hidden="true"></canvas></div>`; }).join('')}</div>
-    <div class="grid g2" style="margin-top:16px">
-      <div class="panel"><h3>Daily plan adherence %</h3><div class="ch"><canvas id="g1"></canvas></div></div>
-      <div class="panel"><h3>Daily planned vs booked MT</h3><div class="ch"><canvas id="g2"></canvas></div></div>
-      <div class="panel"><h3>Process-wise planned vs booked MT</h3><div class="ch"><canvas id="g3"></canvas></div></div>
-      <div class="panel"><h3>Weekly adherence – last 12 weeks</h3><div class="ch"><canvas id="g4"></canvas></div></div>
-      <div class="panel"><h3>Shortfall reasons (Pareto)</h3><div class="ch"><canvas id="g5"></canvas></div></div>
-      <div class="panel"><h3>Delayed WIP trend</h3><div class="ch"><canvas id="g6"></canvas></div></div>
-    </div>
-    <h2>Most delayed WIP <span class="small muted">(red = past lead time)</span></h2>
-    ${del.length?`<div class="tbl-wrap" style="max-height:420px"><table><thead><tr><th>Process</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Customer</th><th>Start date</th><th class="r">Delay (days)</th><th class="r">kg</th></tr></thead><tbody>
-      ${del.slice().sort((a,b)=>(b.delay.delayDays||0)-(a.delay.delayDays||0)).slice(0,20).map(w=>`<tr class="rowbad"><td>${esc(w.processId)}</td><td><b>${esc(w.uid)}</b></td><td>${esc(w.job)}</td><td>${esc(w.die)}</td><td class="wrap">${esc(w.desc)}</td><td>${esc(w.met)}</td><td>${esc(w.cust)}</td><td>${fdate(w.start)}</td><td class="r num"><b>${fmt(w.delay.delayDays)}</b></td><td class="r num">${fmt(w.wt,1)}</td></tr>`).join('')}</tbody></table></div>`
-      :`<div class="empty">${S.wip.length?'No delayed WIP. ✔':'No WIP loaded.'}</div>`}`;
-  m.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{ S.ui.dKind=b.dataset.k; go('dashboard'); });
-  if($('#da')) $('#da').onchange=e=>{ S.ui.dAnchor=e.target.value; go('dashboard'); };
-  if($('#df')) { $('#df').onchange=e=>{ S.ui.dFrom=e.target.value; go('dashboard'); }; $('#dt').onchange=e=>{ S.ui.dTo=e.target.value; go('dashboard'); }; }
-  $('#dp').onchange=e=>{ S.ui.dProc=e.target.value; go('dashboard'); };
-  m.querySelectorAll('.pcard').forEach(s=>{ const f=()=>{ S.ui.dProc=S.ui.dProc===s.dataset.p?'':s.dataset.p; go('dashboard'); }; s.onclick=f; s.onkeydown=e=>{ if(e.key==='Enter') f(); }; });
-  drawDash2(kind,from,to,anchor,pid,A);
-}
-function drawDash2(kind,from,to,anchor,pid,A){
-  if(typeof Chart==='undefined'){ document.querySelectorAll('.ch').forEach(c=>c.innerHTML='<div class="empty">Charts need Chart.js (internet or lib folder).</div>'); return; }
-  const G=ragG(), steel='#3E6283', light='#B9C9D8', bad='#B8322A';
-  const pctAxis={min:0, suggestedMax:110, ticks:{callback:v=>v+'%'}};
-  const base={maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{boxWidth:12}}}, interaction:{mode:'index',intersect:false}};
-  const days=chartDays(kind,from,to,anchor); const dA=days.map(d=>agg(d,d,pid)); const lab=days.map(d=>d.slice(8)+'/'+d.slice(5,7));
-  const target=v=>({label:'Target '+G+'%', data:days.map(()=>v), borderColor:'#2D7A4C', borderDash:[6,4], pointRadius:0, borderWidth:1.5, fill:false});
-  mkChart($('#g1'),{type:'line',data:{labels:lab,datasets:[{label:'Adherence %',data:dA.map(a=>a.adq),borderColor:steel,backgroundColor:'rgba(62,98,131,.10)',fill:true,tension:.3,spanGaps:true,
-      pointRadius:4,pointBackgroundColor:dA.map(a=>ragColor(a.adq)),pointBorderColor:dA.map(a=>ragColor(a.adq))}, target(G)]},options:{...base,scales:{y:pctAxis}}});
-  mkChart($('#g2'),{type:'bar',data:{labels:lab,datasets:[{label:'Planned MT',data:dA.map(a=>a.pkg/1000),backgroundColor:light,borderRadius:4},
-      {label:'Booked MT',data:dA.map(a=>a.akg/1000),backgroundColor:dA.map(a=>a.pkg?ragColor(100*a.akg/a.pkg):steel),borderRadius:4}]},options:{...base,scales:{y:{beginAtZero:true,title:{display:true,text:'MT'}}}}});
-  const ps=sortedProcs().filter(p=>p.active && (!pid||p.id===pid)); const pA=ps.map(p=>agg(from,to,p.id));
-  mkChart($('#g3'),{type:'bar',data:{labels:ps.map(p=>p.id+' '+p.name),datasets:[{label:'Planned MT',data:pA.map(a=>a.pkg/1000),backgroundColor:light,borderRadius:4},
-      {label:'Booked MT',data:pA.map(a=>a.akg/1000),backgroundColor:pA.map(a=>a.pkg?ragColor(100*a.akg/a.pkg):steel),borderRadius:4}]},options:{...base,indexAxis:'y',scales:{x:{beginAtZero:true,title:{display:true,text:'MT'}}}}});
-  const wks=[...Array(12).keys()].map(i=>E.addDays(E.weekStart(anchor),(i-11)*7)); const wA=wks.map(w=>agg(w,E.addDays(w,6),pid));
-  mkChart($('#g4'),{type:'bar',data:{labels:wks.map(w=>fdate(w).slice(0,6)),datasets:[{type:'line',label:'Target '+G+'%',data:wks.map(()=>G),borderColor:'#2D7A4C',borderDash:[6,4],pointRadius:0,borderWidth:1.5},
-      {label:'Adherence %',data:wA.map(a=>a.adq),backgroundColor:wA.map(a=>ragColor(a.adq)),borderRadius:4}]},options:{...base,scales:{y:pctAxis}}});
-  const rs=Object.entries(A.reasons).sort((a,b)=>b[1].q-a[1].q); const tot=rs.reduce((s,r)=>s+r[1].q,0); let cum=0;
-  if(rs.length) mkChart($('#g5'),{type:'bar',data:{labels:rs.map(r=>r[0]),datasets:[{label:'Shortfall qty',data:rs.map(r=>r[1].q),backgroundColor:bad,borderRadius:4},
-      {type:'line',label:'Cumulative %',data:rs.map(r=>{ cum+=r[1].q; return tot?100*cum/tot:0; }),yAxisID:'y1',borderColor:'#D9730D',backgroundColor:'#D9730D',pointRadius:3}]},
-      options:{...base,scales:{y:{beginAtZero:true},y1:{position:'right',min:0,max:100,ticks:{callback:v=>v+'%'},grid:{display:false}}}}});
-  else $('#g5').parentElement.innerHTML='<div class="empty">No shortfall in this period. ✔</div>';
-  const sd=Object.keys(S.snaps||{}).sort().slice(-60);
-  if(sd.length) mkChart($('#g6'),{type:'line',data:{labels:sd.map(d=>d.slice(8)+'/'+d.slice(5,7)),datasets:[{label:'Delayed WIP lines',data:sd.map(d=>pid?((S.snaps[d].byP||{})[pid]||{}).delayed||0:S.snaps[d].delayed),borderColor:bad,backgroundColor:'rgba(184,50,42,.12)',fill:true,tension:.3,pointRadius:3,pointBackgroundColor:bad}]},options:{...base,scales:{y:{beginAtZero:true}}}});
-  else $('#g6').parentElement.innerHTML='<div class="empty">Builds up with each WIP upload.</div>';
-  // sparklines in the process cards: daily adherence of the last 14 days
-  const sp=[...Array(14).keys()].map(i=>E.addDays(anchor,i-13));
-  ps.forEach(p=>{ const el=$('#sp'+p.id); if(!el) return; const v=sp.map(d=>agg(d,d,p.id).adq);
-    mkChart(el,{type:'line',data:{labels:sp,datasets:[{data:v,borderColor:steel,borderWidth:1.5,pointRadius:2,pointBackgroundColor:v.map(x=>ragColor(x)),spanGaps:true,tension:.3}]},
-      options:{maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false,min:0,max:120}}}}); });
-}
 function wipState(w){ return w.completed?'Completed':w.cf.length?'Carry-forward':w.planned?'Planned':'Waiting'; }
 function vWip(m){
   const procs=sortedProcs().filter(p=>canSeeProc(p.id));
@@ -2791,47 +2741,10 @@ async function vDept(m){
   const fn={overview:vDeptOverview, wip:vWip, plan:vPlan, exec:vExec, ht:vHT, htdash:vHTDash, recipes:vHTRecipes, upload:x=>{ S.ui.upTab='wip'; return vUpload(x); }, booking:x=>{ S.ui.upTab='book'; return vUpload(x); }}[tab];
   await fn(sub);
 }
-function vDeptOverview(m){
+async function vDeptOverview(m){
   return plantDash(m,{pids:S.deptCtx.pids, plant:false, title:'Department review', after:x=>{ const b=document.createElement('div'); b.className='row'; b.style.marginTop='12px';
     b.innerHTML=['upload','booking',isRole('Admin','Department User')?'exec':null,'plan'].filter(Boolean).map(k=>`<button class="btn ghost" data-go="${k}">${{upload:'Upload Synchro WIP',booking:'Upload Synchro booking',exec:'Enter actuals',plan:'Day plan'}[k]}</button>`).join('');
     x.prepend(b); b.querySelectorAll('[data-go]').forEach(y=>y.onclick=()=>go(y.dataset.go)); }});
-}
-function vDeptOverviewOld(m){
-  const pids=S.deptCtx.pids; const today=E.todayISO(); const mStart=today.slice(0,8)+'01';
-  const sumOf=(pid,from,to)=>{ const a={pq:0,pkg:0,aq:0,akg:0,tkg:0,offkg:0,pqC:0,aqC:0};
-    Object.entries(S.sums||{}).forEach(([d,o])=>{ if(d<from||d>to) return; const s=o[pid]; if(!s) return;
-      a.pq+=s.pq; a.pkg+=s.pkg; a.tkg+=(s.tkg!==undefined?s.tkg:s.akg); a.offkg+=s.offkg||0;
-      if(s.submitted||d<today){ a.pqC+=s.pq; a.aqC+=s.aq; } });
-    a.ad=a.pqC?100*a.aqC/a.pqC:null; return a; };
-  const rows=pids.map(pid=>{ const p=procById(pid); const w=S.wip.filter(x=>x.processId===pid);
-    const del=w.filter(x=>x.delay && x.delay.status==='Delayed'); const t=sumOf(pid,today,today), mtd=sumOf(pid,mStart,today);
-    const nextD=Object.keys(S.planIdx||{}).filter(d=>d>=today && S.planIdx[d].includes(pid)).sort();
-    return {p, wl:w.length, wkg:w.reduce((s,x)=>s+x.wt,0), dkg:del.reduce((s,x)=>s+x.wt,0), dl:del.length, t, mtd, cf:S.cfOpen.filter(c=>c.processId===pid).length,
-      planTo:nextD.length?nextD[nextD.length-1]:null, cap:capFor(pid,today)}; });
-  const tot=k=>rows.reduce((s,r)=>s+k(r),0);
-  const mtdAll={pqC:tot(r=>r.mtd.pqC), aqC:tot(r=>r.mtd.aqC)}; const adAll=mtdAll.pqC?100*mtdAll.aqC/mtdAll.pqC:null;
-  const todayPct=tot(r=>r.t.pkg)?100*tot(r=>r.t.tkg)/tot(r=>r.t.pkg):null;
-  m.innerHTML=`<div class="deck">
-      ${dcard('Plan adherence – this month', pctTxt(adAll), 'planned pcs done by their plan day', ragClass(adAll), adAll, true)}
-      ${dcard('Booked today', mt(tot(r=>r.t.tkg))+' <small>MT</small>', 'planned today '+mt(tot(r=>r.t.pkg))+' MT · '+pctTxt(todayPct), ragClass(todayPct), todayPct, true)}
-      ${dcard('Tonnage this month', mt(tot(r=>r.mtd.tkg))+' <small>MT</small>', mt(tot(r=>r.mtd.offkg))+' MT from other plan days', 'info', null, true)}
-      ${dcard('Delayed WIP', fmt(tot(r=>r.dl))+' <small>lines</small>', mt(tot(r=>r.dkg))+' MT past lead time', tot(r=>r.dl)?'bad':'ok', null, true)}
-    </div><div class="deck small4">
-      ${dcard('WIP in department', mt(tot(r=>r.wkg))+' <small>MT</small>', fmt(tot(r=>r.wl))+' lines', 'info')}
-      ${dcard('Open carry-forward', fmt(tot(r=>r.cf))+' <small>lines</small>', 'waiting from earlier days', tot(r=>r.cf)?'warn':'ok')}
-    </div>
-    <div class="tbl-wrap" style="margin-top:14px"><table><thead><tr><th>Process</th><th class="r">WIP lines</th><th class="r">WIP MT</th><th class="r">Delayed MT</th><th class="r">Capacity MT/day</th><th class="r">Planned today</th><th class="r">Booked today</th><th class="r">Month tonnage</th><th class="r">of which other days</th><th class="r">Month adherence</th><th class="r">Open CF</th><th>Planned until</th></tr></thead><tbody>
-      ${rows.map(r=>`<tr><td><b>${esc(r.p.id+' '+r.p.name)}</b>${r.p.type==='HT'?' <span class="chip heat">HT</span>':''}</td><td class="r num">${fmt(r.wl)}</td><td class="r num">${mt(r.wkg)}</td><td class="r num" style="color:${r.dl?'var(--bad)':''};font-weight:${r.dl?600:400}">${mt(r.dkg)}</td><td class="r num">${fmt(r.cap,1)}</td><td class="r num">${mt(r.t.pkg)}</td><td class="r num">${mt(r.t.tkg)}</td><td class="r num">${mt(r.mtd.tkg)}</td><td class="r num">${mt(r.mtd.offkg)}</td><td class="r"><b class="num" style="color:${ragColor(r.mtd.ad)}">${pctTxt(r.mtd.ad)}</b></td><td class="r num">${fmt(r.cf)}</td><td>${r.planTo?fday(r.planTo):'<span class="chip warn">no plan</span>'}</td></tr>`).join('')}</tbody></table></div>
-    <h2>Last 14 days – planned vs booked MT</h2><div class="panel"><canvas id="dch" height="90" aria-label="Planned and booked tonnage per day"></canvas></div>
-    <div class="row" style="margin-top:12px">${['upload','booking',isRole('Admin','Department User')?'exec':null,'plan'].filter(Boolean).map(k=>`<button class="btn ghost" data-go="${k}">${{upload:'Upload Synchro WIP',booking:'Upload Synchro booking',exec:'Enter actuals',plan:'Day plan'}[k]}</button>`).join('')}</div>`;
-  m.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go));
-  const days=[]; for(let i=13;i>=0;i--) days.push(E.addDays(today,-i));
-  if(typeof Chart!=='undefined'){
-    const pl=days.map(d=>pids.reduce((s,pid)=>s+(((S.sums[d]||{})[pid]||{}).pkg||0),0)/1000);
-    const bk=days.map(d=>pids.reduce((s,pid)=>{ const x=(S.sums[d]||{})[pid]; return s+(x?(x.tkg!==undefined?x.tkg:x.akg):0); },0)/1000);
-    S.charts.push(new Chart($('#dch'),{type:'bar',data:{labels:days.map(d=>fdate(d).slice(0,6)),datasets:[{label:'Planned MT',data:pl,backgroundColor:'#B9C9D8',borderRadius:4},{label:'Booked MT',data:bk,backgroundColor:bk.map((v,i)=>pl[i]?ragColor(100*v/pl[i]):'#3E6283'),borderRadius:4}]},
-      options:{responsive:true,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true,title:{display:true,text:'MT'}}}}}));
-  }
 }
 
 /* ===================== MASTERS ===================== */
@@ -3367,6 +3280,7 @@ async function plantDash(m, o){
       ${dcard('Capacity utilisation', pctTxt(A.util), `booked vs target to date of each process (working days × MT/day, Sundays & holidays excluded) · `+delta(A.util,P.util,'%'), A.util>110?'warn':ragClass(A.util), A.util, true, 'cap')}
       ${dcard('Agreed date will miss', fmt(riskL.length)+' <small>lines</small>', `${mt(riskL.reduce((s,w)=>s+w.wt,0))} MT · ${atRisk.length} more at risk`, riskL.length?'bad':'ok', null, true, 'miss')}
     </div>
+    <div id="trendbox"></div>
     <h3 style="margin:16px 0 0">Booked tonnage by process <span class="small muted">(each process separately – click a card for its bookings)</span></h3>
     <div class="deck small4">${G.map(g=>`<div class="dcard clk ${ragClass(g.a.book)}" data-rep="book" data-st="${esc(g.name)}" tabindex="0" role="button" title="Bookings of ${esc(g.name)}">
         <div class="dl">${esc(g.name)} <span class="opn">open ›</span></div><div class="dv num">${mt(g.a.akg)} <small>MT</small></div>
@@ -3402,11 +3316,6 @@ async function plantDash(m, o){
       <tr style="font-weight:700;background:var(--soft)"><td>All processes</td>${plant?'<td></td>':''}<td class="r muted" colspan="4">tonnage is per process – not added up</td><td class="r num" style="color:${ragColor(A.book)}">${pctTxt(A.book)}</td><td class="r num" style="color:${ragColor(A.adq)}">${pctTxt(A.adq)}</td><td class="r muted">–</td><td class="r num" style="color:${ragColor(A.util)}">${pctTxt(A.util)}</td><td class="r num">${mt(A.skg)}</td><td class="r num">${mt(wip.reduce((s,w)=>s+w.wt,0))}</td><td class="r num">–</td><td class="r num">${mt(del.reduce((s,w)=>s+w.wt,0))}</td><td class="r num">${riskL.length}</td><td class="r num">${S.cfOpen.filter(c=>pids.includes(c.processId)).length}</td></tr></tbody></table></div>
     <h2>Day-wise summary <span class="seg" role="group" style="margin-left:10px;vertical-align:middle"><button data-dw="kg" aria-pressed="${(S.ui.dwUnit||'kg')==='kg'}">MT</button><button data-dw="q" aria-pressed="${S.ui.dwUnit==='q'}">Qty</button></span> <button class="btn ghost sm" id="dwx" style="vertical-align:middle">Download Excel</button></h2>
     <div id="dws"></div>
-    <h2>Tonnage</h2>
-    <div class="grid g2">
-      <div class="panel"><h3>Daily booked MT by process</h3><div class="ch"><canvas id="t1"></canvas></div></div>
-      <div class="panel"><h3>Daily plan adherence % by process</h3><div class="ch"><canvas id="t2"></canvas></div></div>
-    </div>
     <h2>Customers</h2>
     <div class="grid g2">
       <div class="panel"><h3>WIP MT by customer (top 10) and process</h3><div class="ch"><canvas id="t3"></canvas></div></div>
@@ -3423,6 +3332,7 @@ async function plantDash(m, o){
       <div class="panel"><h3>Shortfall reasons (Pareto)</h3><div class="ch"><canvas id="t6"></canvas></div></div>
     </div>
     <p class="small muted" style="margin-top:10px">Booked = all actuals of the period (Synchro booking, search booking, day entry, furnace loads). Adherence = planned lines done by their plan day. WIP cover = WIP MT ÷ daily capacity. Delivery risk uses stage lead times (default ${+S.cfg.settings.defaultLTDays||2} days where none is set) and the routing; “at risk” = finishes within ${+S.cfg.settings.riskDays||3} days of the agreed date.</p>`;
+  trendView($('#trendbox'), pids, kind, anchor, from, to);
   // ---- day-wise summary (days × departments/processes)
   const dws=()=>{ const u=S.ui.dwUnit||'kg'; const days=chartDays(kind,from,to,anchor).filter(d=>d<=to);
     const cell=(d,g)=>{ let p=0,b=0; g.pids.forEach(pid=>{ const s=(S.sums[d]||{})[pid]; if(!s) return; p+=u==='kg'?s.pkg:s.pq; b+=u==='kg'?(s.tkg!==undefined?s.tkg:s.akg):(s.tq!==undefined?s.tq:s.aq); }); return [p,b]; };
@@ -3452,10 +3362,6 @@ async function plantDash(m, o){
   if(typeof Chart==='undefined'){ m.querySelectorAll('.ch').forEach(c=>c.innerHTML='<div class="empty">Charts need Chart.js.</div>'); return; }
   const base={maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{boxWidth:12}}}, interaction:{mode:'index',intersect:false}};
   const days=chartDays(kind,from,to,anchor); const lab=days.map(d=>d.slice(8)+'/'+d.slice(5,7));
-  mkChart($('#t1'),{type:'bar',data:{labels:lab,datasets:G.map((g,i)=>({label:g.name,data:days.map(d=>aggP(d,d,g.pids).akg/1000),backgroundColor:PAL[i%PAL.length],borderRadius:2}))},
-    options:{...base,scales:{y:{beginAtZero:true,title:{display:true,text:'MT booked'}}}}});
-  mkChart($('#t2'),{type:'line',data:{labels:lab,datasets:[...G.map((g,i)=>({label:g.name,data:days.map(d=>aggP(d,d,g.pids).adq),borderColor:PAL[i%PAL.length],backgroundColor:PAL[i%PAL.length],spanGaps:true,tension:.3,pointRadius:2})),
-      {label:'Target '+ragG()+'%',data:days.map(()=>ragG()),borderColor:'#2D7A4C',borderDash:[6,4],pointRadius:0,borderWidth:1.5}]},options:{...base,scales:{y:{min:0,suggestedMax:110,ticks:{callback:v=>v+'%'}}}}});
   const top=Object.values(C).sort((a,b)=>b.wkg-a.wkg).slice(0,10);
   mkChart($('#t3'),{type:'bar',data:{labels:top.map(c=>c.c.length>26?c.c.slice(0,25)+'…':c.c),datasets:G.map((g,i)=>({label:g.name,data:top.map(c=>wip.filter(w=>(w.cust||'(unknown)')===c.c && g.pids.includes(w.processId)).reduce((s,w)=>s+w.wt,0)/1000),backgroundColor:PAL[i%PAL.length],stack:'w'}))},
     options:{...base,indexAxis:'y',scales:{x:{stacked:true,title:{display:true,text:'MT'}},y:{stacked:true}}}});
@@ -3581,6 +3487,98 @@ async function shortfallLines(from,to,pids){
   const pairs=[]; Object.entries(S.sums||{}).forEach(([d,o])=>{ if(d<from||d>to) return; Object.keys(o).forEach(pid=>{ if(pids.includes(pid)&&o[pid].sq) pairs.push([d,pid]); }); });
   const docs=await Store.getMany(pairs.map(([d,pid])=>'exec/'+d+'/'+pid)); const out=[];
   docs.forEach((x,i)=>{ if(x) (x.lines||[]).forEach(l=>{ if(l.shortQty>0) out.push({...l, date:pairs[i][0], pid:pairs[i][1]}); }); }); return out;
+}
+
+/* ===================== TREND (day / week / month) ===================== */
+/* The period buttons choose the granularity: Day = last 30 days, Week = last 13 weeks, Month / Year = last 12 months,
+   Custom = daily (≤ 62 days) or weekly. Tonnage is shown per process (never added up), adherence for all processes. */
+function trendBuckets(kind, anchor, from, to){
+  const MON=d=>new Date(Date.UTC(+d.slice(0,4),+d.slice(5,7)-1,1)).toLocaleString('en-GB',{month:'short',year:'2-digit',timeZone:'UTC'});
+  const mEnd=ym=>{ const y=+ym.slice(0,4), m=+ym.slice(5,7); return ym+'-'+String(new Date(Date.UTC(y,m,0)).getUTCDate()).padStart(2,'0'); };
+  const span=Math.round((Date.parse(to)-Date.parse(from))/864e5)+1;
+  if(kind==='Day' || (kind==='Custom' && span<=62)){ const n=kind==='Day'?30:span; const end=kind==='Day'?anchor:to;
+    return {g:'day', b:[...Array(n).keys()].map(i=>{ const d=E.addDays(end,i-n+1); return {k:d, label:d.slice(8)+'/'+d.slice(5,7), from:d, to:d}; })}; }
+  if(kind==='Week' || kind==='Custom'){ const n=kind==='Week'?13:Math.ceil(span/7); const end=E.weekStart(kind==='Week'?anchor:to);
+    return {g:'week', b:[...Array(n).keys()].map(i=>{ const w=E.addDays(end,(i-n+1)*7); return {k:w, label:fdate(w).slice(0,6), from:w, to:E.addDays(w,6)}; })}; }
+  const out=[]; let y=+anchor.slice(0,4), m=+anchor.slice(5,7);
+  for(let i=0;i<12;i++){ const ym=y+'-'+String(m).padStart(2,'0'); out.unshift({k:ym, label:MON(ym+'-01'), from:ym+'-01', to:mEnd(ym)}); m--; if(!m){ m=12; y--; } }
+  return {g:'month', b:out};
+}
+function trendView(el, pidsAll, kind, anchor, from, to){
+  const today=E.todayISO(); const procs=pidsAll.filter(id=>procById(id) && procById(id).type!=='HT');
+  if(!procs.length){ el.innerHTML=''; return; }
+  const proc=S.ui.trProc && procs.includes(S.ui.trProc)? S.ui.trProc : procs[0];
+  const {g, b}=trendBuckets(kind, anchor, from, to);
+  const unit={day:'day',week:'week',month:'month'}[g];
+  const calc=(bk,pid)=>{ const a={pq:0,aqC:0,pqC:0,pkg:0,akgC:0,pkgC:0,tq:0,tkg:0,sq:0,target:0,targetToDate:0};
+    for(let d=bk.from; d<=bk.to; d=E.addDays(d,1)){ const x=(S.sums[d]||{})[pid]; const p=procById(pid);
+      if(p && E.isWorkDay(d,p,S.cfg.holidays)){ const c=capFor(pid,d)*1000; a.target+=c; if(d<today || (d===today && x && ((x.tkg??x.akg)>0))) a.targetToDate+=c; }   // today counts once something is booked
+      if(!x) continue; a.pq+=x.pq; a.pkg+=x.pkg; a.tq+=(x.tq??x.aq)||0; a.tkg+=(x.tkg??x.akg)||0; a.sq+=x.sq||0;
+      if(x.submitted||d<today){ a.pqC+=x.pq; a.aqC+=x.aq; a.pkgC+=x.pkg; a.akgC+=x.akg; } }
+    a.ad=a.pqC?100*a.aqC/a.pqC:null; a.ofPlan=a.pkg?100*a.tkg/a.pkg:null; a.ofT=a.targetToDate?100*a.tkg/a.targetToDate:null; a.future=bk.from>today; return a; };
+  const P={}; procs.forEach(pid=>P[pid]=b.map(bk=>calc(bk,pid)));
+  const S1=P[proc]; const last=b.reduce((k,bk,i)=>bk.from<=today?i:k,-1);
+  // cards: latest day / week / month that already has data (today without a plan is skipped)
+  let ci=last; while(ci>0 && !S1[ci].pqC && !S1[ci].tkg) ci--;
+  const cur=S1[ci]||{}, prv=S1[ci-1]||{}; const running=b[ci] && b[ci].to>=today && g!=='day';
+  const closedIdx=b.map((bk,i)=>i).filter(i=>S1[i].pqC);
+  const avgAd=closedIdx.length?100*closedIdx.reduce((s,i)=>s+S1[i].aqC,0)/closedIdx.reduce((s,i)=>s+S1[i].pqC,0):null;
+  const on=closedIdx.filter(i=>S1[i].ad>=ragG()).length;
+  const arrow=(c,p,u)=>c===null||c===undefined||p===null||p===undefined||isNaN(c)||isNaN(p)?'':`<span class="dlt ${c>=p?'up':'down'}">${c>=p?'▲':'▼'} ${Math.abs(c-p).toFixed(u==='%'?1:2)}${u} vs previous ${unit}</span>`;
+  const curLbl=b[ci]?b[ci].label+(running?' (so far)':''):'';
+  el.innerHTML=`<div class="trhead"><h2 style="margin:0">${{day:'Day-wise',week:'Week-wise',month:'Month-wise'}[g]} trend <span class="small muted">(${b.length} ${unit}s – change with Day / Week / Month above)</span></h2>
+      <div class="seg" role="group" aria-label="Process">${procs.map(id=>`<button data-trp="${id}" aria-pressed="${id===proc}">${esc(id+' '+procName(id))}</button>`).join('')}</div></div>
+    <div class="deck small4">
+      ${dcard(`Adherence – ${esc(curLbl)}`, pctTxt(cur.ad), `${fmt(cur.aqC||0)} of ${fmt(cur.pqC||0)} planned pcs · `+arrow(cur.ad,prv.ad,'%'), ragClass(cur.ad))}
+      ${dcard(`Booked – ${esc(curLbl)}`, mt(cur.tkg||0)+' <small>MT</small>', `plan ${mt(cur.pkg||0)} MT · ${pctTxt(cur.ofPlan)} of plan · `+arrow((cur.tkg||0)/1000,(prv.tkg||0)/1000,' MT'), ragClass(cur.ofPlan))}
+      ${dcard(`vs target – ${esc(curLbl)}`, pctTxt(cur.ofT), `target to date ${mt(cur.targetToDate||0)} MT (working days × MT/day)`, ragClass(cur.ofT))}
+      ${dcard(`Average adherence – ${b.length} ${unit}s`, pctTxt(avgAd), `${on} of ${closedIdx.length} ${unit}(s) ≥ ${ragG()}%`, ragClass(avgAd))}
+    </div>
+    <div class="grid g2" style="margin-top:12px">
+      <div class="panel"><h3>Plan vs actual tonnage – ${esc(proc+' '+procName(proc))}</h3><div class="ch" style="height:290px"><canvas id="tr1"></canvas></div></div>
+      <div class="panel"><h3>Plan adherence % – ${procs.length>1?'all processes':esc(proc+' '+procName(proc))}</h3><div class="ch" style="height:290px"><canvas id="tr2"></canvas></div></div>
+      <div class="panel"><h3>Plan vs actual quantity (pcs) – ${esc(proc+' '+procName(proc))}</h3><div class="ch" style="height:270px"><canvas id="tr3"></canvas></div></div>
+      <div class="panel"><h3>${g==='month'&&b[last]&&b[last].k===today.slice(0,7)?esc(b[last].label)+' – cumulative booked vs target':'Booked vs target % – '+(procs.length>1?'all processes':esc(proc))}</h3><div class="ch" style="height:270px"><canvas id="tr4"></canvas></div></div>
+    </div>
+    <details class="panel" style="margin-top:10px"><summary style="cursor:pointer"><b>${{day:'Day',week:'Week',month:'Month'}[g]}-wise table</b> <span class="small muted">plan, actual and adherence per process</span></summary>
+      <div class="tbl-wrap" style="max-height:420px;margin-top:8px"><table class="dwt"><thead><tr><th rowspan="2">${{day:'Day',week:'Week from',month:'Month'}[g]}</th>${procs.map(pid=>`<th colspan="5" class="c">${esc(pid+' '+procName(pid))}</th>`).join('')}</tr>
+        <tr>${procs.map(()=>'<th class="r">Plan MT</th><th class="r">Booked MT</th><th class="r">Plan pcs</th><th class="r">Done pcs</th><th class="r">Adherence</th>').join('')}</tr></thead><tbody>
+        ${b.map((bk,i)=>({bk,i})).filter(({bk})=>bk.from<=today).reverse().map(({bk,i})=>`<tr><td>${esc(bk.label)}</td>${procs.map(pid=>{ const a=P[pid][i]; return `<td class="r num">${a.pkg?mt(a.pkg):''}</td><td class="r num">${a.tkg?mt(a.tkg):''}</td><td class="r num">${a.pq?fmt(a.pq):''}</td><td class="r num">${a.pqC?fmt(a.aqC):''}</td><td class="r">${a.pqC?`<span class="badge" style="background:${ragColor(a.ad)}">${pctTxt(a.ad)}</span>`:''}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div></details>`;
+  el.querySelectorAll('[data-trp]').forEach(x=>x.onclick=()=>{ S.ui.trProc=x.dataset.trp; trendView(el,pidsAll,kind,anchor,from,to); });
+  if(typeof Chart==='undefined') return;
+  const base={maintainAspectRatio:false, interaction:{mode:'index',intersect:false}, plugins:{legend:{position:'bottom',labels:{boxWidth:12}}}};
+  const lab=b.map(x=>x.label);
+  const fut=i=>b[i].from>today || (b[i].from===today && !S1[i].pq && !S1[i].tq) || (g==='day' && !S1[i].target && !S1[i].pq && !S1[i].tq);   // future, empty today, off days
+  mkChart($('#tr1'),{type:'bar',data:{labels:lab,datasets:[
+      {label:'Planned MT',data:S1.map((a,i)=>g==='day'&&!a.pq&&!a.target?null:a.pkg/1000),backgroundColor:'#B9C9D8',borderRadius:4},
+      {label:'Booked MT',data:S1.map((a,i)=>fut(i)?null:a.tkg/1000),backgroundColor:S1.map(a=>a.pkg?ragColor(a.ofPlan):'#3E6283'),borderRadius:4},
+      {type:'line',label:'Target MT',data:S1.map(a=>g==='day'&&!a.target?null:a.target/1000),spanGaps:false,borderColor:'#1C2733',borderDash:[5,4],pointRadius:g==='day'?0:2,borderWidth:1.5}]},
+    options:{...base,scales:{y:{beginAtZero:true,title:{display:true,text:'MT'}}}}});
+  mkChart($('#tr2'),{type:'line',data:{labels:lab,datasets:[...procs.map((pid,k)=>{ const v=P[pid].map(a=>a.ad); return {label:pid+' '+procName(pid),data:v,borderColor:PAL[k%PAL.length],backgroundColor:PAL[k%PAL.length],spanGaps:true,tension:.3,borderWidth:pid===proc?3:1.5,
+        pointRadius:pid===proc?4:2,pointBackgroundColor:v.map(x=>x===null?PAL[k%PAL.length]:ragColor(x)),pointBorderColor:v.map(x=>x===null?PAL[k%PAL.length]:ragColor(x))}; }),
+      {label:'Target '+ragG()+'%',data:b.map(()=>ragG()),borderColor:'#2D7A4C',borderDash:[6,4],pointRadius:0,borderWidth:1.5}]},
+    options:{...base,scales:{y:{min:0,suggestedMax:110,ticks:{callback:v=>v+'%'}}}}});
+  mkChart($('#tr3'),{type:'bar',data:{labels:lab,datasets:[
+      {label:'Planned pcs',data:S1.map(a=>a.pq),backgroundColor:'#B9C9D8',borderRadius:4},
+      {label:'Done on plan pcs',data:S1.map((a,i)=>fut(i)?null:a.aqC),backgroundColor:S1.map(a=>ragColor(a.ad)),borderRadius:4},
+      {type:'line',label:'All booked pcs',data:S1.map((a,i)=>fut(i)?null:a.tq),borderColor:'#D9730D',backgroundColor:'#D9730D',pointRadius:2,tension:.2}]},
+    options:{...base,scales:{y:{beginAtZero:true,title:{display:true,text:'pcs'}}}}});
+  if(g==='month' && b[last] && b[last].k===today.slice(0,7)){
+    const md=[]; for(let d=b[last].from; d<=b[last].to; d=E.addDays(d,1)) md.push(d);
+    const cap=d=>{ const p=procById(proc); return p&&E.isWorkDay(d,p,S.cfg.holidays)?capFor(proc,d):0; };
+    let cb=0,ct=0,cp=0; const bu=md.map(d=>{ const x=(S.sums[d]||{})[proc]||{}; ct+=cap(d); cp+=(x.pkg||0)/1000; if(d<=today) cb+=((x.tkg??x.akg)||0)/1000; return {d,b:d<=today?cb:null,t:ct,p:cp}; });
+    const wd=md.filter(d=>d<=today&&cap(d)>0).length, rate=wd?cb/wd:0; let k=0;
+    mkChart($('#tr4'),{type:'line',data:{labels:md.map(d=>d.slice(8)),datasets:[
+        {label:'Booked (cumulative)',data:bu.map(x=>x.b),borderColor:'#D9730D',backgroundColor:'rgba(217,115,13,.12)',fill:true,tension:.2,pointRadius:2},
+        {label:'Target (cumulative)',data:bu.map(x=>x.t),borderColor:'#2D7A4C',borderDash:[6,4],pointRadius:0},
+        {label:'Plan (cumulative)',data:bu.map(x=>x.p),borderColor:'#3E6283',pointRadius:0},
+        {label:'Forecast at current rate',data:md.map(d=>{ if(cap(d)>0) k++; return d>=today? +(rate*k).toFixed(3):null; }),borderColor:'#D9730D',borderDash:[2,4],pointRadius:0}]},
+      options:{...base,scales:{y:{beginAtZero:true,title:{display:true,text:'MT'}}}}});
+  } else {
+    mkChart($('#tr4'),{type:'line',data:{labels:lab,datasets:[...procs.map((pid,k)=>({label:pid+' '+procName(pid),data:P[pid].map((a,i)=>(b[i].from>today||(b[i].from===today&&!a.tq)||!a.targetToDate)?null:a.ofT),borderColor:PAL[k%PAL.length],backgroundColor:PAL[k%PAL.length],spanGaps:true,tension:.3,pointRadius:2,borderWidth:pid===proc?3:1.5})),
+        {label:'100% of target',data:b.map(()=>100),borderColor:'#2D7A4C',borderDash:[6,4],pointRadius:0,borderWidth:1.5}]},
+      options:{...base,scales:{y:{min:0,suggestedMax:120,ticks:{callback:v=>v+'%'}}}}});
+  }
 }
 
 
