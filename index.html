@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Production Planning – Day-wise | AMTC Foundry</title>
-<!-- Production Planning – day-wise · Release 1.1 (26-Nov-2026: vendor master + vendor-wise planning and challan lists for Rough Machining / Finish Fettling) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
+<!-- Production Planning – day-wise · Release 1.4 (28-Nov-2026: “Add to the existing plan” method, past-date guard, all-days plan overview) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
@@ -378,7 +378,7 @@ const GROUP_LABEL=['Carry-forward','Delayed','FIFO'];
 
 /* Normal (FIFO + capacity) planning over a horizon of working days.
    Strict priority: once a line no longer fits, the day closes (lower lines never jump ahead). */
-function planNormal(proc, queue, startDate, horizonDays, holidays, capFor){
+function planNormal(proc, queue, startDate, horizonDays, holidays, capFor, fullCapFor){
   const days=[]; let d=firstWorkDayOnOrAfter(startDate,proc,holidays);
   const pending=queue.map(e=>({...e}));
   let i=0;
@@ -388,7 +388,8 @@ function planNormal(proc, queue, startDate, horizonDays, holidays, capFor){
     while(i<pending.length){
       const e=pending[i]; const uw=e.item.unitWt||0;
       let fit = uw>0 ? Math.floor((cap-used)/uw+1e-9) : e.qty;
-      if(fit<=0 && used===0 && uw>cap) fit=1;     // oversize piece: plan 1 so it is never stuck
+      const full=fullCapFor? fullCapFor(d)*1000 : cap;
+      if(fit<=0 && used===0 && uw>cap && uw>full) fit=1;     // piece bigger than a whole day: plan 1 so it is never stuck (not when the day is only partly free)
       const take=Math.min(e.qty, Math.max(0,fit));
       if(take<=0) break;
       lines.push({ key:e.item.key, item:e.item, qty:take, kg:take*uw, group:e.group, cfIds:e.cfIds, prio:lines.length+1 });
@@ -1322,26 +1323,46 @@ function parseUploadSheet(){
   const hasAreas=aoa.some(r=>r && /^process area/i.test(String(r[0]||'').trim()));
   $('#uprocw').style.display=hasAreas?'none':'';
   try{
+    const hv=hasAreas?-1:aoa.findIndex((r,i)=>i<30 && r && r.some(c=>/^\s*uid/i.test(String(c||''))) && r.some(c=>/sub ?-?contractor|vendor|party/i.test(String(c||''))));
+    if(hv>=0){ const pid=$('#uproc').value; const p=parseVendorList(aoa, hv, pid); p.sheet=sn; p.file=S.ui.upFile; p.hasAreas=false; return showUploadPreview(p); }
     const p=E.parseSynchroRows(aoa, hasAreas?{}:{defaultArea:areaFor($('#uproc').value)}); p.sheet=sn; p.file=S.ui.upFile; p.hasAreas=hasAreas;
     showUploadPreview(p);
   }catch(err){ $('#uprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; }
+}
+/* vendor-wise items list (castings handed over to vendors with a challan) → WIP of one process, at vendor */
+function parseVendorList(aoa, hr, pid){
+  const H=aoa[hr].map(h=>String(h||'').replace(/\s+/g,' ').trim().toLowerCase()); const fi=(...r)=>{ for(const re of r){ const i=H.findIndex(h=>re.test(h)); if(i>=0) return i; } return -1; };
+  const c={uid:fi(/^uid/), part:fi(/part/), desc:fi(/desc|product/), ch:fi(/challan/), qty:fi(/^qty|quantity/), job:fi(/job/), po:fi(/order/), met:fi(/m[ae]tall/), ven:fi(/sub ?-?contractor|vendor|party/), die:fi(/pattern|die|tool/), wt:fi(/black|weight|wt/), cust:fi(/customer/)};
+  const g=(r,k)=>c[k]>=0?r[c[k]]:null; const tx=v=>String(v??'').trim();
+  const area=pid+'-'+procName(pid)+' (Subcontract vendor)'; const rows=[]; const warnings=[];
+  for(let i=hr+1;i<aoa.length;i++){ const r=aoa[i]||[]; const uid=tx(g(r,'uid')); if(!uid) continue;
+    const chTxt=tx(g(r,'ch')); const m=chTxt.match(/^(.*?)\s*-\s*(\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4})\s*$/); const chNo=m?m[1].trim():chTxt;
+    let chDate=null; if(m){ const [d,mo,y]=m[2].split(/[\/.-]/).map(Number); const yy=y<100?2000+y:y; chDate=yy+'-'+String(mo).padStart(2,'0')+'-'+String(d).padStart(2,'0'); }
+    else if(typeof g(r,'ch')==='number') chDate=E.parseDateAny(g(r,'ch'));
+    const qty=Math.max(1,Math.round(+g(r,'qty')||1)), wt=+g(r,'wt')||0;
+    rows.push({area, src:i+1, origin:'vendor', vendor:tx(g(r,'ven')), challan:chNo, challanDate:chDate, cust:tx(g(r,'cust')), po:tx(g(r,'po')), job:tx(g(r,'job')), part:tx(g(r,'part')),
+      die:tx(g(r,'die')), desc:tx(g(r,'desc')), met:tx(g(r,'met')).replace(/^'+/,''), uid, qty, wt, unitWt:qty?wt/qty:wt, start:chDate, agreed:null, jobEnd:null, occ:1}); }
+  if(c.wt<0) warnings.push('No weight column found – tonnage will be 0.');
+  return {rows, areas:{[area]:rows.length}, warnings, vendorFile:true, vendorPid:pid};
 }
 function toWipRow(r, seenMap, snapDate){
   const pid=E.areaCode(r.area); const key=E.keyOf(pid,r.uid,r.occ);
   return {key, processId:pid, area:r.area, src:r.src, cust:r.cust, po:r.po, job:r.job, part:r.part, die:r.die, desc:r.desc, met:r.met, uid:r.uid,
     poured:r.poured, pouredRaw:r.pouredRaw, age:r.age, qty:r.qty, wt:r.wt, unitWt:r.unitWt, agreed:r.agreed, jobEnd:r.jobEnd, start:r.start,
-    startRaw:r.startRaw, cert:r.cert, issues:r.issues, firstSeen:(seenMap&&seenMap[key])||snapDate};
+    startRaw:r.startRaw, cert:r.cert, issues:r.issues, firstSeen:(seenMap&&seenMap[key])||snapDate,
+    origin:r.origin||'synchro', vendor:r.vendor||'', challan:r.challan||'', challanDate:r.challanDate||null};
 }
 const normUID=u=>String(u||'').trim().toUpperCase();
 /* duplicate analysis of an upload against itself and against the WIP already in the app */
-function analyseUpload(fileRows, pids){
+function analyseUpload(fileRows, pids, origin){
+  origin=origin||'synchro';
   const seenF={}, rowsU=[], dupFile=[];
   fileRows.forEach(x=>{ const k=E.areaCode(x.area)+'|'+normUID(x.uid); if(seenF[k]){ dupFile.push(x); return; } seenF[k]=1; rowsU.push(x); });
   const existing={}; S.wip.filter(w=>pids.includes(w.processId)).forEach(w=>{ existing[w.processId+'|'+normUID(w.uid)]=w; });
   const fresh=[], same=[];
   rowsU.forEach(x=>{ (existing[E.areaCode(x.area)+'|'+normUID(x.uid)]?same:fresh).push(x); });
   const inFile=new Set(rowsU.map(x=>E.areaCode(x.area)+'|'+normUID(x.uid)));
-  const gone=Object.entries(existing).filter(([k])=>!inFile.has(k)).map(([k,w])=>w);
+  const gone=Object.entries(existing).filter(([k,w])=>!inFile.has(k) && (w.origin||'synchro')===origin).map(([k,w])=>w);   // only lines of the same kind of list leave
   const stageOf={}; S.wip.forEach(w=>{ (stageOf[normUID(w.uid)]=stageOf[normUID(w.uid)]||new Set()).add(w.processId); });
   const otherStage=rowsU.filter(x=>{ const st=stageOf[normUID(x.uid)]; return st && [...st].some(pid=>pid!==E.areaCode(x.area)); });
   return {rowsU, dupFile, fresh, same, gone, otherStage, stageOf};
@@ -1349,16 +1370,23 @@ function analyseUpload(fileRows, pids){
 async function showUploadPreview(p){
   const full=canFullUpload(); const mine=myUploadPids();
   if(!(full && p.hasAreas && routingOn())){
-    const rows=(full && p.hasAreas)? p.rows : p.rows.filter(x=>mine.includes(E.areaCode(x.area)));   // full Master WIP: new stages too
+    let rows=(full && p.hasAreas)? p.rows : p.rows.filter(x=>mine.includes(E.areaCode(x.area)));   // full Master WIP: new stages too
+    let vInfo='';
+    if(p.vendorFile){ const vp=p.vendorPid; const known=vendorsFor(vp); const ok=new Set(known.map(v=>vKey(v.name)));
+      const names=[...new Set(rows.map(x=>x.vendor).filter(Boolean))]; const out=rows.filter(x=>known.length && !ok.has(vKey(x.vendor)));
+      const only=S.ui.vlOnly!==false && known.length>0;
+      if(only) rows=rows.filter(x=>ok.has(vKey(x.vendor)));
+      vInfo=`<div class="banner info"><b>Vendor-wise items list</b> for ${esc(vp+' '+procName(vp))}: ${fmt(p.rows.length)} rows · ${names.length} vendor(s). Castings are loaded as <b>at vendor (Subcontract)</b> with vendor, challan no. and challan date; the challan date is the start date.
+        ${known.length?`<label style="display:block;margin-top:6px"><input type="checkbox" id="vlonly" ${only?'checked':''}> Only vendors marked for ${esc(vp)} in Masters › Vendors (${known.length}) – ${fmt(out.length)} row(s) of other vendors ${only?'are left out':'are included'}</label>`:`<div style="margin-top:6px">No vendor is marked for ${esc(vp)} yet – all rows are taken. ${isRole('Admin')?'Vendors missing from the list are added to Masters › Vendors automatically.':''}</div>`}</div>`; }
     const other=p.rows.length-rows.length;
     let pids=[...new Set(rows.map(x=>E.areaCode(x.area)))];
     if(full && p.hasAreas) pids=[...new Set([...pids, ...((S.wipMeta&&S.wipMeta.pids)||[])])];   // full Master WIP: stages missing in the file are emptied
-    const A=analyseUpload(rows, pids);
+    const A=analyseUpload(rows, pids, p.vendorFile?'vendor':'synchro');
     const tile=(n,l,c,id)=>`<button class="kpi" data-ul="${id}" style="text-align:left;cursor:pointer;border:1px solid var(--line)"><div class="v num ${c||''}">${fmt(n)}</div><div class="l">${l}</div></button>`;
     const list=(arr,extra)=>arr.length?`<div class="tbl-wrap" style="max-height:260px"><table><thead><tr><th>Process</th><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th class="r">Qty</th>${extra?'<th>Note</th>':''}</tr></thead><tbody>${arr.slice(0,500).map(x=>{ const pid=x.processId||E.areaCode(x.area);
         return `<tr><td>${esc(pid)}</td><td><b>${esc(x.uid)}</b></td><td>${esc(x.job)}</td><td>${esc(x.die)}</td><td>${esc(x.desc)}</td><td class="r num">${fmt(x.qty)}</td>${extra?`<td class="small">${esc(extra(x))}</td>`:''}</tr>`; }).join('')}</tbody></table></div>`:'<div class="empty" style="padding:12px">None.</div>';
     const mode0=S.ui.upMode||'add';
-    $('#uprev').innerHTML=`<div class="banner info">Sheet “${esc(p.sheet)}”: ${fmt(rows.length)} WIP lines for ${[...new Set(rows.map(x=>E.areaCode(x.area)))].map(id=>esc(id+' '+procName(id))).join(', ')||'–'}.${other?` ${fmt(other)} lines of other processes are ignored.`:''}</div>
+    $('#uprev').innerHTML=vInfo+`<div class="banner info">Sheet “${esc(p.sheet)}”: ${fmt(rows.length)} WIP lines for ${[...new Set(rows.map(x=>E.areaCode(x.area)))].map(id=>esc(id+' '+procName(id))).join(', ')||'–'}.${other?` ${fmt(other)} lines of other processes are ignored.`:''}</div>
       <h3 style="margin-top:6px">Duplicate check before upload</h3>
       <div class="kpis" style="margin-bottom:10px">
         ${tile(A.fresh.length,'Fresh UIDs – will be added','ok','fresh')}
@@ -1378,6 +1406,7 @@ async function showUploadPreview(p){
     const names={fresh:'Fresh UIDs',same:'Already in WIP',dupFile:'Duplicates inside the file (excluded)',other:'UID also in another stage',gone:'In app but not in file'};
     $('#uprev').querySelectorAll('[data-ul]').forEach(b=>b.onclick=()=>{ $('#ulist').innerHTML=`<h3>${names[b.dataset.ul]}</h3>`+lists[b.dataset.ul]; });
     $('#uprev').querySelectorAll('[name=umode]').forEach(r=>r.onchange=()=>{ S.ui.upMode=r.value; });
+    if($('#vlonly')) $('#vlonly').onchange=e=>{ S.ui.vlOnly=e.target.checked; parseUploadSheet(); };
     if(A.dupFile.length) $('#ulist').innerHTML=`<h3>${names.dupFile}</h3>`+lists.dupFile;
     $('#ugo').onclick=()=>commitStageUpload(p, A, pids, $('#ud').value||E.todayISO(), $('#uprev').querySelector('[name=umode]:checked').value, full && p.hasAreas,
       $('#urep')&&$('#urep').checked ? ($('#urfrom').value||E.addDays(E.todayISO(),1)) : null);
@@ -1419,10 +1448,18 @@ async function commitStageUpload(p, A, pids, snapDate, mode, fullFile, replanFro
       const mineRows=rows.filter(r=>r.processId===pid);
       if(mode==='add'){ if(!mineRows.length && !A.same.some(x=>E.areaCode(x.area)===pid)) continue;
         await Store.update('wipp/'+pid, d=>{ d=d||{rows:[]}; const have=new Set(d.rows.map(r=>normUID(r.uid))); added=0; skippedRace=0;
-          const fa={}; A.same.forEach(x=>{ if(E.areaCode(x.area)===pid) fa[normUID(x.uid)]=x.area; }); d.rows.forEach(r=>{ const a=fa[normUID(r.uid)]; if(a) r.area=a; });
+          const fa={}; A.same.forEach(x=>{ if(E.areaCode(x.area)===pid) fa[normUID(x.uid)]=x; });
+          d.rows.forEach(r=>{ const x=fa[normUID(r.uid)]; if(!x) return; r.area=x.area; if(x.origin){ r.origin=x.origin; r.vendor=x.vendor||''; r.challan=x.challan||''; r.challanDate=x.challanDate||null; } });
           mineRows.forEach(r=>{ if(have.has(normUID(r.uid))){ skippedRace++; return; } have.add(normUID(r.uid)); d.rows.push(r); added++; }); return d; }); }
-      else await Store.set('wipp/'+pid,{rows:mineRows});
+      else { const origin=p.vendorFile?'vendor':'synchro'; const inF=new Set(mineRows.map(r=>normUID(r.uid)));
+        await Store.update('wipp/'+pid, d=>{ d=d||{rows:[]}; const keep=d.rows.filter(r=>(r.origin||'synchro')!==origin && !inF.has(normUID(r.uid))); d.rows=keep.concat(mineRows); return d; }); }
     }
+    if(p.vendorFile){ const vp=p.vendorPid; const src=A.rowsU.filter(x=>x.vendor);
+      if(isRole('Admin')){ const have=new Set((S.cfg.vendors||[]).map(v=>vKey(v.name))); const add=[...new Set(src.map(x=>x.vendor))].filter(n=>!have.has(vKey(n)));
+        if(add.length) await saveConfig(c=>{ c.vendors=c.vendors||[]; add.forEach(n=>c.vendors.push({id:uidGen('V'), name:n, code:'', pids:[vp], capMT:null, active:true})); }, 'Vendors added from vendor-wise items list: '+add.length);
+        await saveConfig(c=>{ (c.vendors||[]).forEach(v=>{ if(src.some(x=>vKey(x.vendor)===vKey(v.name)) && !(v.pids||[]).includes(vp)) v.pids=[...(v.pids||[]),vp]; }); }, 'Vendors marked for '+vp); }
+      const byKey={}; (S.cfg.vendors||[]).forEach(v=>byKey[vKey(v.name)]=v.id); const at=new Date().toISOString();
+      await Store.update('vend/'+vp, d=>{ d=d||{m:{}}; src.forEach(x=>{ d.m[normUID(x.uid)]={v:byKey[vKey(x.vendor)]||'', vn:x.vendor, ch:x.challan||'', chd:x.challanDate||null, by:S.user.username, at, from:'list'}; }); return d; }); }
     await Store.update('wip/meta', m=>{ m=m||{layout:'byProcess',pids:[]}; m.layout='byProcess'; m.pids=Array.from(new Set([...(m.pids||[]),...pids]));
       m.procSnap=m.procSnap||{}; pids.forEach(pid=>m.procSnap[pid]={date:snapDate, file:p.file, by:S.user.username, at:new Date().toISOString(), mode});
       if(!m.snapshotDate || snapDate>=m.snapshotDate){ m.snapshotDate=snapDate; m.file=p.file; } m.uploadedAt=new Date().toISOString(); return m; });
@@ -1430,7 +1467,7 @@ async function commitStageUpload(p, A, pids, snapDate, mode, fullFile, replanFro
       await updateCF(list=>{ list.filter(c=>pids.includes(c.processId) && !keep.has(c.processId+'|'+normUID(c.uid))).forEach(c=>{ c.status='Closed'; c.closeNote='Left stage in Synchro ('+snapDate+')'; c.closedAt=new Date().toISOString(); }); }); }
     const stat={fresh:A.fresh.length, kept:mode==='update'?A.same.length:0, skippedInWip:mode==='add'?A.same.length:0, removed:mode==='update'?A.gone.length:0, dupInFile:A.dupFile.length,
       dupUIDs:A.dupFile.slice(0,50).map(x=>E.areaCode(x.area)+' '+x.uid)};
-    const label=(fullFile?'Master WIP':'Department')+' – '+(mode==='add'?'add fresh only':'update stage');
+    const label=(p.vendorFile?'Vendor-wise items list':fullFile?'Master WIP':'Department')+' – '+(mode==='add'?'add fresh only':'update stage');
     await Store.update('uploads/'+snapDate.slice(0,4), d=>{ d=d||{list:[]}; d.list.push({id:upId, kind:'wip', ts:new Date().toISOString(), snapshotDate:snapDate, file:p.file, rows:rows.length, kg:rows.reduce((s,x)=>s+x.wt,0), by:S.user.username, mode:label, pids, stat}); return d; });
     await audit('Upload WIP', label+' '+pids.join(',')+': '+p.file+' – fresh '+stat.fresh+', kept '+stat.kept+', removed '+stat.removed+', duplicates in file excluded '+stat.dupInFile+(mode==='add'?', already in WIP skipped '+stat.skippedInWip:''));
     await loadAll(); await writeSnapshot(snapDate);
@@ -1581,6 +1618,7 @@ async function parseBooking(){
   box.innerHTML=`<div class="banner info">${fmt(recs.length)} booking row(s) · ${Object.entries(days).sort().map(([d,n])=>fdate(d)+': '+n).join(' · ')} · columns used: UID “${esc(aoa[hr][cU])}”${cQ>=0?`, qty “${esc(aoa[hr][cQ])}”`:', qty = open planned qty'}${cD>=0?`, date “${esc(aoa[hr][cD])}”`:', date '+fdate(defDate)}${cBy>=0?`, booked by “${esc(aoa[hr][cBy])}”`:''}${cP>=0?`, process “${esc(aoa[hr][cP])}”`:' · process from the stage heading rows'}.</div>
     <label class="small" style="display:block;margin:4px 0 8px"><input type="checkbox" id="bstrict" ${strict?'checked':''}> Ignore bookings dated <b>before the plan was published</b> (e.g. a file downloaded from the 1st of the month)</label>
     <div class="kpis" style="margin-bottom:10px">${tile(matched.length,'Matched to the plan – will be booked','ok','matched')}${tile(unplanned.length,'Not in plan (in WIP) – discarded',unplanned.length?'warn':'','unplanned')}${tile(notFound.length,'Not in plan / WIP – discarded',notFound.length?'warn':'','notFound')}${tile(early.length,'Booked before the plan – ignored',early.length?'warn':'','early')}${tile(already.length,'Already booked – skipped','','already')}${tile(otherProc.length+future.length,'Other process / future date – ignored','','otherProc')}${tile(dupInFile.length,'Duplicate rows – ignored','','dup')}</div>
+    <div id="bsplit"></div>
     <div id="blist"></div>
     <div class="row" style="margin-top:12px"><button class="btn heat" id="bgo">Book ticked lines</button><button class="btn ghost" id="bman">Manual entry (line by line)…</button><span class="small muted" id="bcount"></span></div>
     <p class="small muted">Only castings that are in the published plan are booked – everything else in the file is discarded, so booked tonnage can never be more than the plan. Tick / untick lines and change the qty before booking.</p>`;
@@ -1588,7 +1626,13 @@ async function parseBooking(){
   L.otherProc=L.otherProc+(future.length?'<h3>Future booking date</h3>'+L.future:'');
   const showList=id=>{ $('#blist').innerHTML=`<h3>${names[id]}</h3>`+L[id]; bindChecks(); };
   const state={}; [['m',matched,true]].forEach(([g,arr,on])=>arr.forEach((x,i)=>{ state[g+':'+i]={on, qty:x.take}; }));
-  const count=()=>{ const n=Object.values(state).filter(v=>v.on).length; $('#bcount').textContent=n+' line(s) ticked for booking'; $('#bgo').disabled=!n; };
+  const splitOf=()=>{ const sp={}; matched.forEach((x,i)=>{ const st=state['m:'+i]; if(!st||!st.on) return; const kg=Math.min(st.qty,x.take)*(+x.c.line.unitWt||0);
+      const d=sp[x.date]=sp[x.date]||{kg:0,q:0,own:0,other:{}}; d.kg+=kg; d.q+=Math.min(st.qty,x.take); if(x.c.planDate===x.date) d.own+=kg; else d.other[x.c.planDate]=(d.other[x.c.planDate]||0)+kg; }); return sp; };
+  const drawSplit=()=>{ const sp=splitOf(); const ds=Object.keys(sp).sort();
+    $('#bsplit').innerHTML=ds.length?`<div class="panel" style="margin-bottom:10px"><h3 style="margin:0 0 6px">Booking split – what the booked tonnage covers</h3><div class="tbl-wrap"><table><thead><tr><th>Booked on</th><th class="r">Booked (all)</th><th class="r">For that day's plan</th><th>For other plan days</th></tr></thead><tbody>
+      ${ds.map(d=>{ const x=sp[d]; return `<tr><td><b>${fday(d)}</b></td><td class="r num"><b>${mt(x.kg)} MT</b> · ${fmt(x.q)} pcs</td><td class="r num">${mt(x.own)} MT</td><td>${Object.entries(x.other).sort().map(([pd,kg])=>`<span class="chip ${pd<d?'warn':'blue'}">${mt(kg)} MT of ${fdate(pd).slice(0,6)} plan${pd<d?' (backlog)':' (ahead)'}</span>`).join(' ')||'–'}</td></tr>`; }).join('')}</tbody></table></div>
+      <div class="small muted" style="margin-top:4px">Each casting is booked against its own plan day (adherence of that day); the tonnage counts on the booking day.</div></div>`:''; };
+  const count=()=>{ const n=Object.values(state).filter(v=>v.on).length; $('#bcount').textContent=n+' line(s) ticked for booking'; $('#bgo').disabled=!n; drawSplit(); };
   const bindChecks=()=>{ $('#blist').querySelectorAll('[data-bk]').forEach(c=>{ c.checked=state[c.dataset.bk].on; c.onchange=()=>{ state[c.dataset.bk].on=c.checked; count(); }; });
     $('#blist').querySelectorAll('[data-bq]').forEach(q=>{ q.value=state[q.dataset.bq].qty; q.onchange=()=>{ state[q.dataset.bq].qty=Math.max(1,Math.round(+q.value||1)); }; }); };
   box.querySelectorAll('[data-bl]').forEach(b=>b.onclick=()=>showList(b.dataset.bl));
@@ -1601,8 +1645,8 @@ async function parseBooking(){
       matched.forEach((x,i)=>{ const st=state['m:'+i]; if(!st.on) return; const q=Math.min(st.qty, x.c.remaining+x.take);
         entries.push({pid:x.pid, planDate:x.c.planDate, line:x.c.line, qty:q, date:x.date, remarks:rmk(x)}); });
       if(!entries.length){ toast('Nothing ticked.',true); $('#bgo').disabled=false; $('#bgo').textContent='Book ticked lines'; return; }
-      const upId=uidGen('UP'); const n=await bookLines(entries,'synchro',upId);
-      await Store.update('uploads/'+E.todayISO().slice(0,4), d=>{ d=d||{list:[]}; d.list.push({id:upId, kind:'booking', ts:new Date().toISOString(), snapshotDate:defDate, file:S.ui.bkFile, rows:n, kg:entries.reduce((s,e)=>s+e.qty*(+e.line.unitWt||0),0), by:S.user.username, mode:'Synchro booking', pids}); return d; });
+      const upId=uidGen('UP'); const split=splitOf(); const n=await bookLines(entries,'synchro',upId);
+      await Store.update('uploads/'+E.todayISO().slice(0,4), d=>{ d=d||{list:[]}; d.list.push({id:upId, kind:'booking', ts:new Date().toISOString(), snapshotDate:defDate, file:S.ui.bkFile, rows:n, kg:entries.reduce((s,e)=>s+e.qty*(+e.line.unitWt||0),0), by:S.user.username, mode:'Synchro booking', pids, split:Object.fromEntries(Object.entries(split).map(([d,x])=>[d,{kg:x.kg,own:x.own,other:x.other}]))}); return d; });
       toast(n+' booking(s) saved as actuals.'); go('booking');
     }catch(e){ console.error(e); toast('Booking failed: '+e.message,true); $('#bgo').disabled=false; $('#bgo').textContent='Book ticked lines'; } };
 }
@@ -1627,7 +1671,7 @@ async function uploadHistory(el, filter, mine, full){
   const l=docs.flatMap((d,i)=>((d||{}).list||[]).map(u=>({...u, _y:i?y-1:y}))).filter(filter).filter(u=>full||!u.pids||u.pids.some(p=>mine.includes(p))).sort((a,b)=>a.ts<b.ts?1:-1);
   const admin=isRole('Admin');
   el.innerHTML=l.length?`<div class="tbl-wrap" style="max-height:420px"><table><thead><tr><th>Uploaded</th><th>Snapshot / booking date</th><th>File</th><th>Mode / process</th><th class="r">Lines</th><th class="r">MT</th><th>By</th>${admin?'<th></th>':''}</tr></thead><tbody>
-    ${l.map((u,i)=>`<tr style="${u.deleted?'opacity:.55;text-decoration:line-through':''}"><td>${fdt(u.ts)}</td><td>${fdate(u.snapshotDate)}</td><td>${esc(u.file||'')}</td><td>${esc(u.mode||'Snapshot')}${u.pids?' · '+esc(u.pids.join(', ')):''}${u.stat?`<div class="small muted">fresh ${u.stat.fresh} · kept ${u.stat.kept} · removed ${u.stat.removed} · duplicates excluded ${u.stat.dupInFile}${u.stat.skippedInWip?' · already in WIP '+u.stat.skippedInWip:''}</div>`:''}${u.deleted?`<div class="small" style="text-decoration:none">deleted ${fdt(u.deletedAt)} by ${esc(u.deletedBy)}</div>`:''}</td>
+    ${l.map((u,i)=>`<tr style="${u.deleted?'opacity:.55;text-decoration:line-through':''}"><td>${fdt(u.ts)}</td><td>${fdate(u.snapshotDate)}</td><td>${esc(u.file||'')}</td><td>${esc(u.mode||'Snapshot')}${u.pids?' · '+esc(u.pids.join(', ')):''}${u.stat?`<div class="small muted">fresh ${u.stat.fresh} · kept ${u.stat.kept} · removed ${u.stat.removed} · duplicates excluded ${u.stat.dupInFile}${u.stat.skippedInWip?' · already in WIP '+u.stat.skippedInWip:''}</div>`:''}${u.split?Object.entries(u.split).sort().map(([d,x])=>`<div class="small muted">${fdate(d).slice(0,6)}: ${mt(x.kg)} MT = ${mt(x.own)} MT own plan${Object.entries(x.other||{}).map(([pd,kg])=>' + '+mt(kg)+' MT of '+fdate(pd).slice(0,6)).join('')}</div>`).join(''):''}${u.deleted?`<div class="small" style="text-decoration:none">deleted ${fdt(u.deletedAt)} by ${esc(u.deletedBy)}</div>`:''}</td>
       <td class="r num">${fmt(u.rows)}</td><td class="r num">${mt(u.kg)}</td><td>${esc(u.by)}</td>${admin?`<td>${u.deleted?'':`<button class="btn danger sm" data-uh="${i}">Delete</button>`}</td>`:''}</tr>`).join('')}</tbody></table></div>`
     :'<div class="empty">No uploads yet.</div>';
   el.querySelectorAll('[data-uh]').forEach(b=>b.onclick=()=>deleteUpload(l[+b.dataset.uh]));
@@ -1692,7 +1736,8 @@ async function deleteBookingUpload(u){
 const capFor=(pid,date)=>{ const o=S.cfg.capOverrides[date+'|'+pid]; const p=procById(pid); return o!==undefined&&o!==null&&o!==''? +o : (p&&p.capacityMT!==''&&p.capacityMT!==undefined ? +p.capacityMT : +S.cfg.settings.defaultCapMT||5); };
 /* Day-wise plan over several days. Castings already planned on an earlier day whose actuals are not submitted stay
    reserved for that day, so the same casting is never planned twice. Days that already have actuals are kept as they are. */
-async function buildPreview(start, nDays){
+async function buildPreview(start, nDays, opts){
+  opts=opts||{};   // opts.append: keep every line of the published days and only fill their free capacity
   const today=E.todayISO(); const idx=S.planIdx||{};
   const procs=sortedProcs().filter(p=>p.active);
   const relDates=Object.keys(idx).filter(d=>d>=E.addDays(start,-14)).sort();
@@ -1707,7 +1752,7 @@ async function buildPreview(start, nDays){
       const x=X[d+'|'+p.id]; const submitted=x && x.status==='Submitted';
       if(d>=start){ if(hasActuals(d,p.id)) locked[d]=true;
         else { replace.push(d);                       // re-planned – but lines already booked (search / Synchro) stay on this day
-          const pl=P[d+'|'+p.id]; const fx=pl? pl.lines.filter(l=>(l.bookings||[]).length):[];
+          const pl=P[d+'|'+p.id]; const fx=pl? pl.lines.filter(l=>opts.append || (l.bookings||[]).length):[];
           if(fx.length){ fixed[d]=fx; fx.forEach(l=>{ const open=Math.max(0,l.qty-bookedQty(l)); if(open) reserved[l.key]=(reserved[l.key]||0)+open; }); }
           return; } }
       if(!submitted){ const pl=P[d+'|'+p.id]; if(pl){ pl.lines.forEach(l=>{ reserved[l.key]=(reserved[l.key]||0)+l.qty; }); if(d<start) reservedDays.push(d); } }
@@ -1716,8 +1761,8 @@ async function buildPreview(start, nDays){
     const cf=S.cfOpen.filter(c=>c.processId===p.id && (c.status==='Open' || (c.status==='Planned' && replace.includes(c.plannedOn))));
     const q=E.buildQueue(items, cf, reserved);
     const fixedOpenKg=d=>(fixed[d]||[]).reduce((s,l)=>s+Math.max(0,l.qty-bookedQty(l))*(+l.unitWt||0),0);   // still to be done on that day
-    const pl=E.planNormal(p, q, start, nDays, S.cfg.holidays, d=>locked[d]?0:Math.max(0.001, capFor(p.id,d)-fixedOpenKg(d)/1000));
-    const days=pl.days.map(d=>({ date:d.date, capKg:d.capKg, usedKg:d.usedKg+fixedOpenKg(d.date), locked:!!locked[d.date], fixed:fixed[d.date]||[],
+    const pl=E.planNormal(p, q, start, nDays, S.cfg.holidays, d=>locked[d]?0:Math.max(0.001, capFor(p.id,d)-fixedOpenKg(d)/1000), d=>capFor(p.id,d));
+    const days=pl.days.map(d=>({ date:d.date, capKg:locked[d.date]?d.capKg:capFor(p.id,d.date)*1000, usedKg:d.usedKg+fixedOpenKg(d.date), locked:!!locked[d.date], fixed:fixed[d.date]||[],   // capKg = full day capacity, not only the free part
       lines:d.lines.map((l,i)=>lineFrom(l.item,l.qty,l.kg,l.group,l.cfIds,(fixed[d.date]||[]).length+i+1)) }));
     Object.keys(fixed).forEach(d=>{ if(!days.some(x=>x.date===d)) days.push({date:d, capKg:capFor(p.id,d)*1000, usedKg:fixedOpenKg(d), locked:false, fixed:fixed[d], lines:[]}); });
     days.sort((a,b)=>a.date<b.date?-1:1);
@@ -1778,11 +1823,13 @@ function bindDayNav(root, sel, set){
 }
 async function vPlan(m){
   const date=S.ui.planDate||E.todayISO(); S.ui.planDate=date;
-  const admin=isRole('Admin');
+  const admin=isRole('Admin') || (!!S.deptCtx && isRole('Department User','HT User'));   // department users plan their own department
   const [pub, ex]=await Promise.all([loadPlanDocs(date), loadExecDocs(date)]);
   const mode=!admin ? 'published' : (S.ui.planMode || (!Object.keys(pub).length ? 'preview':'published'));
   const nDays=S.ui.planDays||(+S.cfg.settings.horizonDays||10);
-  const prev=admin && mode==='preview'? await buildPreview(date, nDays):null;
+  const hasPub=Object.entries(S.planIdx||{}).some(([d,ps])=>d>=date && ps.some(pid=>canSeeProc(pid)));
+  const pmethod=S.ui.planMethod || (hasPub?'append':'replan');
+  const prev=admin && mode==='preview'? await buildPreview(date, nDays, {append:pmethod==='append'}):null;
   m.innerHTML=head('Daily plan', 'FIFO by Start Date → Agreed Date → Job End Date → source order. Carry-forward first, then already-delayed WIP. Daily capacity from the Process Master.',
     dayNav(date)+
     (admin?`<div class="seg" role="group"><button data-m="preview" aria-pressed="${mode==='preview'}">New plan preview</button><button data-m="published" aria-pressed="${mode==='published'}">Published plan</button></div>`:''))
@@ -1794,12 +1841,13 @@ async function vPlan(m){
   if(mode==='published'){
     if(!Object.keys(pub).length){ body.innerHTML='<div class="empty">No plan has been published for '+fdate(date)+'.'+(admin?' Switch to “New plan preview” to build and publish one.':'')+'</div>'; return; }
     const printable=procs.filter(p=>pub[p.id] && pub[p.id].lines.length).map(p=>p.id);
-    body.innerHTML=`<div class="row" style="justify-content:flex-end;margin:-4px 0 10px"><button class="btn" id="pprint">Print plan…</button></div>`+procs.map(p=>{ const d=pub[p.id]; if(!d) return '';
+    body.innerHTML=planOverview(procs, date, null)+`<div class="row" style="justify-content:flex-end;margin:-4px 0 10px"><button class="btn" id="pprint">Print plan…</button></div>`+procs.map(p=>{ const d=pub[p.id]; if(!d) return '';
       const x=ex[p.id]; const st=x? (x.status==='Submitted'?'<span class="chip ok">Actuals submitted</span>':'<span class="chip warn">Actuals in progress</span>') : '<span class="chip mute">Awaiting actuals</span>';
       return `<div class="panel" style="margin-bottom:12px"><div class="row" style="justify-content:space-between"><h3>${esc(p.id+' · '+p.name)}</h3><div class="row">${st}<span class="small muted">Published ${fdt(d.publishedAt)} by ${esc(d.publishedBy)}</span></div></div>
         <div class="small muted" style="margin-bottom:8px">${d.lines.length} lines · ${fmt(d.lines.reduce((s,l)=>s+l.qty,0))} pcs · ${mt(d.lines.reduce((s,l)=>s+l.kg,0))} MT${d.capKg?' of '+mt(d.capKg)+' MT capacity':''}</div>
         ${planTable(d.lines)}</div>`; }).join('') || '<div class="empty">Nothing published for your process on this date.</div>';
     if($('#pprint')) $('#pprint').onclick=()=> printable.length? printOptions(date, printable) : toast('Nothing to print for this day.',true);
+    bindOverview(body);
     return;
   }
   // preview (admin): day-wise plan for several days
@@ -1809,10 +1857,17 @@ async function vPlan(m){
   const endD=allDays.length?allDays[allDays.length-1]:date;
   const resv=[...new Set(pvs.flatMap(v=>v.reservedDays||[]))].sort();
   const hz=+S.cfg.settings.horizonDays||10;
-  body.innerHTML=`${resv.length?`<div class="banner warn">Plans of ${resv.map(fday).join(', ')} have no submitted actuals yet. Their castings stay reserved for those days and are not planned again. Submit those actuals so shortfalls come back as carry-forward.</div>`:''}
+  const today=E.todayISO();
+  body.innerHTML=`${date<today?`<div class="banner warn">The plan starts on ${fday(date)}, which is in the past – those days cannot be worked any more. <button class="btn sm heat" id="ptoday">Plan from today (${fdate(today).slice(0,6)})</button></div>`:''}
+    <div class="panel" style="margin-bottom:12px"><b>Planning method</b>
+      <label style="display:block;margin-top:6px"><input type="radio" name="pmeth" value="append" ${pmethod==='append'?'checked':''}> <b>Add to the existing plan</b> – published days keep all their castings; new castings fill the free capacity of each day (oldest Start Date first), then the next days.</label>
+      <label style="display:block;margin-top:4px"><input type="radio" name="pmeth" value="replan" ${pmethod==='replan'?'checked':''}> <b>Re-plan from ${fdate(date).slice(0,6)}</b> – all open castings are put in order again (carry-forward, delayed, oldest Start Date) and the days are filled from the start; booked lines stay.</label></div>
+    ${planOverview(procs, date, prev)}
+    ${resv.length?`<div class="banner warn">Plans of ${resv.map(fday).join(', ')} have no submitted actuals yet. Their castings stay reserved for those days and are not planned again. Submit those actuals so shortfalls come back as carry-forward.</div>`:''}
     <div class="panel" style="margin-bottom:14px"><div class="row" style="justify-content:space-between">
       <div class="row"><label class="field">Days to plan<select id="pdays">${[1,2,3,5,7].filter(n=>n<hz).map(n=>`<option value="${n}" ${n===nDays?'selected':''}>${n} working day${n>1?'s':''}</option>`).join('')}<option value="${hz}" ${nDays===hz?'selected':''}>Until WIP is covered (max ${hz} days)</option></select></label>
-        <div class="small muted" style="max-width:520px">Each process is filled day by day up to its daily capacity, oldest first; every casting appears on one day only. Days that already have actuals are kept. Publishing replaces the not-yet-executed days from ${fday(date)} onward.</div></div>
+        <div class="small muted" style="max-width:520px">Each process is filled day by day up to its daily capacity, oldest first; every casting appears on one day only. Days that already have actuals are kept. ${pmethod==='append'?'Published days keep their castings; only free capacity is filled.':'Publishing re-plans the not-yet-executed days from '+fday(date)+' onward.'}</div></div>
+      ${!allDays.length&&pmethod==='append'?'<div class="small" style="color:var(--ok)">Nothing new to add – every open casting is already in the published plan. Choose “Re-plan” to put them in order again.</div>':''}
       <button class="btn heat" id="pub" ${allDays.length?'':'disabled'}>Publish day-wise plan${S.deptCtx?' – '+esc((deptById(S.deptCtx.id)||{}).name||'this department')+' only':' – all departments'}: ${fdate(date)}${endD!==date?' → '+fdate(endD):''}</button></div></div>
     ${S.deptCtx && isRole('Admin','Management')?`<div class="banner info">You are inside the department module <b>${esc((deptById(S.deptCtx.id)||{}).name||'')}</b>: publishing here plans <b>only ${S.deptCtx.pids.map(esc).join(', ')}</b>. To plan every department in one go, use <b>Publish plan (all)</b> in the left menu.</div>`:''}
     ${planCoverage(prev, procs)}
@@ -1832,6 +1887,9 @@ async function vPlan(m){
     await audit('Carry-forward priority', sel.dataset.cfp+' → '+sel.value); derive(); go('plan'); });
   body.querySelectorAll('[data-tog]').forEach(b=>b.onclick=()=>{ const t=document.getElementById('t'+b.dataset.tog); t.hidden=!t.hidden; b.textContent=t.hidden?'Show lines':'Hide lines'; });
   $('#pub').onclick=()=>publishPlan(date, prev);
+  body.querySelectorAll('[name=pmeth]').forEach(r=>r.onchange=()=>{ S.ui.planMethod=r.value; go('plan'); });
+  if($('#ptoday')) $('#ptoday').onclick=()=>{ S.ui.planDate=today; go('plan'); };
+  bindOverview(body);
 }
 function planCard(pv, date){
   if(!pv) return '';
@@ -1839,7 +1897,7 @@ function planCard(pv, date){
   const all=days.flatMap((d,i)=>[...(d.fixed||[]),...d.lines].map(l=>({...l, day:d.date})));
   const tot=all.reduce((s,l)=>s+l.kg,0);
   const tiles=days.map((d,i)=>`<div class="dtile ${d.locked?'lock':''}"><span class="small muted">D${i+1} · ${WD[E.weekdayISO(d.date)]} ${fdate(d.date).slice(0,6)}</span><b class="num">${d.locked?'kept':mt([...(d.fixed||[]),...d.lines].reduce((s,l)=>s+l.kg,0))+' MT'}</b>
-      ${d.capKg?`<div class="bar"><i style="width:${Math.min(100,100*(d.usedKg||0)/d.capKg)}%"></i></div>`:''}<span class="small muted">${d.locked?'has actuals':((d.fixed||[]).length?d.lines.length+' new + '+d.fixed.length+' booked':d.lines.length+' lines')}</span></div>`).join('');
+      ${d.capKg?`<div class="bar"><i style="width:${Math.min(100,100*(d.usedKg||0)/d.capKg)}%"></i></div>`:''}<span class="small muted">${d.locked?'has actuals':((d.fixed||[]).length?d.lines.length+' new + '+d.fixed.length+' kept':d.lines.length+' lines')}</span></div>`).join('');
   if(pv.ht) return `<div class="panel" style="margin-bottom:12px;border-left:4px solid var(--heat)"><div class="row" style="justify-content:space-between"><h3>${esc(p.id+' · '+p.name)} <span class="chip heat">Furnace loads</span></h3>
     <span class="small muted">${planned.reduce((s,d)=>s+d.batches.length,0)} load(s) · ${all.length} lines · ${mt(tot)} MT in this period</span></div>
     ${days.length?`<div class="dtiles">${tiles}</div><button class="btn ghost sm" data-tog="${p.id}" style="margin-top:8px">Show lines</button><div id="t${p.id}" hidden style="margin-top:8px">${planTable(all,true)}</div>`:'<div class="small muted">No furnace load starts in this period. Load castings to F1 or F2 in HT planning.</div>'}</div>`;
@@ -1847,7 +1905,7 @@ function planCard(pv, date){
   const ov=S.cfg.capOverrides[date+'|'+p.id];
   return `<div class="panel" style="margin-bottom:12px"><div class="row" style="justify-content:space-between;align-items:flex-start">
     <div><h3>${esc(p.id+' · '+p.name)}</h3><div class="small muted">WIP ${mt(pv.wipKg)} MT · to plan ${mt(pv.plannableKg)} MT · covered in ${clear}</div></div>
-    <div class="row"><label class="field">Capacity MT on ${fdate(date).slice(0,6)}<input type="number" step="0.1" min="0" data-cap="${p.id}" placeholder="${p.capacityMT}" value="${ov??''}"></label>
+    <div class="row"><label class="field">Capacity MT on ${fdate(date).slice(0,6)}<input type="number" step="0.1" min="0" data-cap="${p.id}" placeholder="${p.capacityMT}" value="${ov??''}" ${isRole('Admin')?'':'disabled title="Capacity is set by the administrator"'}></label>
       <div class="kpi" style="padding:4px 10px"><div class="v num">${mt(tot)}</div><div class="l">planned MT · ${all.length} lines</div></div></div></div>
     ${days.length?`<div class="dtiles">${tiles}</div>`:'<div class="small muted">Nothing to plan.</div>'}
     ${all.length?`<button class="btn ghost sm" data-tog="${p.id}" style="margin-top:8px">Show lines</button><div id="t${p.id}" hidden style="margin-top:8px">${planTable(all,true)}</div>`:''}</div>`;
@@ -2024,6 +2082,23 @@ function planCoverage(prev, procs){
     <div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Process</th><th>Status</th><th class="r">WIP lines</th><th class="r">WIP MT</th><th>WIP snapshot</th><th class="r">Capacity MT/day</th><th>Planning</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 
+/* all plan days at a glance (no need to open every day): day × process = planned MT vs capacity.
+   In the preview it shows the days that will be published. */
+function planOverview(procs, sel, prev){
+  const today=E.todayISO(); const ps=procs.filter(p=>p.type!=='HT');
+  const cell={};
+  if(prev){ ps.forEach(p=>{ const v=prev[p.id]; if(!v) return; v.days.forEach(d=>{ const L=[...(d.fixed||[]),...d.lines]; if(!L.length && !d.locked) return;
+      cell[d.date+'|'+p.id]={kg:L.reduce((s,l)=>s+l.kg,0), n:L.length, cap:capFor(p.id,d.date)*1000, locked:d.locked, kept:(d.fixed||[]).length}; }); }); }
+  else Object.entries(S.sums||{}).forEach(([d,o])=>{ if(d<E.addDays(today,-3)) return; ps.forEach(p=>{ const x=o[p.id]; if(x&&x.pq) cell[d+'|'+p.id]={kg:x.pkg, n:x.lines||0, cap:x.capKg||capFor(p.id,d)*1000, done:x.submitted}; }); });
+  const days=[...new Set(Object.keys(cell).map(k=>k.split('|')[0]))].sort();
+  if(!days.length) return '';
+  return `<div class="panel" style="margin-bottom:12px"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${prev?'Plan to be published – all days at a glance':'Published plan – all days at a glance'}</h3><span class="small muted">MT planned vs capacity · click a day to open it</span></div>
+    <div class="tbl-wrap" style="max-height:340px;margin-top:8px"><table><thead><tr><th>Day</th>${ps.map(p=>`<th class="r">${esc(p.id+' '+p.name)}</th>`).join('')}</tr></thead><tbody>
+    ${days.map(d=>`<tr class="${d===sel?'selrow':''}" data-ovd="${d}" style="cursor:pointer"><td>${fday(d)}${d<today?' <span class="chip mute">past</span>':d===today?' <span class="chip warn">today</span>':''}</td>${ps.map(p=>{ const c=cell[d+'|'+p.id]; if(!c) return '<td></td>';
+      const u=c.cap?100*c.kg/c.cap:null; return `<td class="r"><b class="num">${mt(c.kg)}</b> <span class="small muted">/ ${mt(c.cap)}</span>${u!==null?`<div class="bar" style="margin-top:2px"><i style="width:${Math.min(100,u)}%;background:${u>100?'var(--bad)':u>=90?'var(--ok)':'var(--warn)'}"></i></div>`:''}<div class="small muted">${c.locked?'has actuals':c.kept?c.n-c.kept+' new + '+c.kept+' kept':c.n+' lines'}${c.done?' · submitted':''}</div></td>`; }).join('')}</tr>`).join('')}</tbody></table></div></div>`;
+}
+function bindOverview(root){ root.querySelectorAll('[data-ovd]').forEach(r=>r.onclick=()=>{ S.ui.planDate=r.dataset.ovd; S.ui.planMode='published'; go('plan'); }); }
+
 /* ===================== EXECUTION ENTRY ===================== */
 /* Two tabs: (1) the day's plan – partial submission allowed, open lines carry forward;
              (2) search any open planned casting (any plan day) and book it on the day it was really processed. */
@@ -2048,6 +2123,7 @@ async function vExec(m){
   const VA=(vend&&vend.m)||{};
   const xl=(ex&&ex.lines)||[];
   const offLines=xl.filter(l=>l.source && l.source!=='day');        // booked on this date via search / Synchro
+  const dayBk={all:0, own:0, other:{}}; xl.forEach(l=>{ const kg=+l.actualKg||((+l.actualQty||0)*(+l.unitWt||0)); if(!kg) return; dayBk.all+=kg; const pd=l.planDate||(l.source&&l.source!=='day'?'none':date); if(pd===date) dayBk.own+=kg; else dayBk.other[pd]=(dayBk.other[pd]||0)+kg; });
   const offHtml=offLines.length?`<h2>Also booked on ${fdate(date)} (${offLines.length})</h2><div class="tbl-wrap" style="max-height:260px"><table><thead><tr><th>UID</th><th>Job</th><th>Tooling no.</th><th>Description</th><th>Planned for</th><th class="r">Actual qty</th><th class="r">kg</th><th>Booked via</th><th>By</th></tr></thead><tbody>
       ${offLines.map(l=>`<tr><td><b>${esc(l.uid)}</b></td><td>${esc(l.job)}</td><td>${esc(l.die||'')}</td><td class="wrap">${esc(l.desc||'')}</td><td>${l.planDate?(l.planDate===date?'this day':fdate(l.planDate)):'<span class="chip warn">unplanned</span>'}</td><td class="r num">${fmt(l.actualQty)}</td><td class="r num">${fmt(l.actualKg,1)}</td><td>${esc(l.source==='synchro'?'Synchro booking':'UID search')}</td><td>${esc(l.bookedBy||'')}</td></tr>`).join('')}</tbody></table></div>`:'';
   if(!plan){ const st=dayStatus(date,[pid]);
@@ -2086,7 +2162,7 @@ async function vExec(m){
     $('#esum').innerHTML=`<div class="kpi"><div class="v num">${fmt(pq)}</div><div class="l">Planned qty</div></div><div class="kpi"><div class="v num">${fmt(done)}</div><div class="l">Done (incl. booked on other days)</div></div>
       <div class="kpi ${ragClass(ad)}"><div class="v num">${pctTxt(ad)}</div><div class="l">Plan adherence (qty)</div></div><div class="kpi ${ragClass(pct(dk,pk))}"><div class="v num">${pctTxt(pct(dk,pk))}</div><div class="l">Weight adherence</div></div>
       <div class="kpi ${blank?'warn':''}"><div class="v num">${blank}</div><div class="l">Open lines – carry forward if left empty</div></div><div class="kpi ${need?'bad':''}"><div class="v num">${need}</div><div class="l">Partial lines needing a reason</div></div>
-      <div class="kpi"><div class="v num">${mt(offLines.reduce((s,l)=>s+(l.actualKg||0),0))}</div><div class="l">MT booked via search / Synchro on this day</div></div>`;
+      <div class="kpi"><div class="v num">${mt(dayBk.all)}</div><div class="l">Booked on this day (all) · ${mt(dayBk.own)} MT for this day's plan${Object.entries(dayBk.other).sort().map(([pd,kg])=>' · '+mt(kg)+' MT of '+(pd==='none'?'unplanned':fdate(pd).slice(0,6)+' plan')).join('')}</div></div>`;
     return {blank,need}; };
   recalc();
   $('#erows')&&$('#erows').addEventListener('input',recalc); $('#erows')&&$('#erows').addEventListener('change',recalc);
@@ -3339,17 +3415,17 @@ async function plantDash(m, o){
   trendView($('#trendbox'), pids, kind, anchor, from, to);
   // ---- day-wise summary (days × departments/processes)
   const dws=()=>{ const u=S.ui.dwUnit||'kg'; const days=chartDays(kind,from,to,anchor).filter(d=>d<=to);
-    const cell=(d,g)=>{ let p=0,b=0; g.pids.forEach(pid=>{ const s=(S.sums[d]||{})[pid]; if(!s) return; p+=u==='kg'?s.pkg:s.pq; b+=u==='kg'?(s.tkg!==undefined?s.tkg:s.akg):(s.tq!==undefined?s.tq:s.aq); }); return [p,b]; };
+    const cell=(d,g)=>{ let p=0,b=0,o=0; g.pids.forEach(pid=>{ const s=(S.sums[d]||{})[pid]; if(!s) return; p+=u==='kg'?s.pkg:s.pq; b+=u==='kg'?(s.tkg!==undefined?s.tkg:s.akg):(s.tq!==undefined?s.tq:s.aq); o+=u==='kg'?(s.offkg||0):(s.offq||0); }); return [p,b,o]; };
     const f=v=>u==='kg'?mt(v):fmt(v);
     const rows=days.map(d=>{ const c=G.map(g=>cell(d,g)); const tp=c.reduce((s,x)=>s+x[0],0), tb=c.reduce((s,x)=>s+x[1],0); return {d,c,tp,tb}; }).filter(r=>r.tp||r.tb).reverse();      // days with a plan or bookings, latest first
     const tot=G.map((g,i)=>[rows.reduce((s,r)=>s+r.c[i][0],0), rows.reduce((s,r)=>s+r.c[i][1],0)]);
     const pc=(p,b)=>p?`<span style="color:${ragColor(100*b/p)};font-weight:600">${pctTxt(100*b/p)}</span>`:'<span class="muted">–</span>';
     const v=x=>u==='kg'?+(x/1000).toFixed(3):x;
-    S.ui.dwData={u, head:['Date',...G.flatMap(g=>[g.name+' plan',g.name+' booked'])], rows:rows.map(r=>[r.d,...r.c.flat().map(v)])};
+    S.ui.dwData={u, head:['Date',...G.flatMap(g=>[g.name+' plan',g.name+' booked'])], rows:rows.map(r=>[r.d,...r.c.flatMap(x=>[v(x[0]),v(x[1])])])};
     if(!rows.length){ $('#dws').innerHTML='<div class="empty">No plan or booking in this period.</div>'; return; }
     $('#dws').innerHTML=`<div class="tbl-wrap" style="max-height:460px"><table class="dwt"><thead><tr><th rowspan="2">Day</th>${G.map(g=>`<th colspan="3" class="c">${esc(g.name)}</th>`).join('')}</tr>
       <tr>${G.map(()=>`<th class="r">Plan</th><th class="r">Booked</th><th class="r">%</th>`).join('')}</tr></thead><tbody>
-      ${rows.map(r=>`<tr${E.weekdayISO(r.d)===0?' style="background:#F6F7F9"':''}><td>${fday(r.d)}</td>${r.c.map(([p,b])=>`<td class="r num">${p?f(p):''}</td><td class="r num">${b?f(b):''}</td><td class="r">${pc(p,b)}</td>`).join('')}</tr>`).join('')}
+      ${rows.map(r=>`<tr${E.weekdayISO(r.d)===0?' style="background:#F6F7F9"':''}><td>${fday(r.d)}</td>${r.c.map(([p,b,o])=>`<td class="r num">${p?f(p):''}</td><td class="r num" ${o?`title="${f(b-o)} for this day's plan, ${f(o)} for other plan days / unplanned"`:''}>${b?f(b):''}${o?`<div class="small muted">${f(b-o)} own · ${f(o)} other</div>`:''}</td><td class="r">${pc(p,b)}</td>`).join('')}</tr>`).join('')}
       <tr style="font-weight:700;background:var(--soft)"><td>Period total</td>${tot.map(([p,b])=>`<td class="r num">${f(p)}</td><td class="r num">${f(b)}</td><td class="r">${pc(p,b)}</td>`).join('')}</tr></tbody></table></div>
       <div class="small muted" style="margin-top:4px">Plan = published plan; Booked = all actuals booked that day (incl. castings planned for other days). Each process is shown separately – a casting is booked once in every process it passes. ${u==='kg'?'Values in MT.':'Values in pcs.'}</div>`; };
   dws();
@@ -3591,7 +3667,7 @@ function trendView(el, pidsAll, kind, anchor, from, to){
    so they survive the next WIP upload. */
 const vendorPids=()=>(S.cfg.settings.vendorPids && S.cfg.settings.vendorPids.length? S.cfg.settings.vendorPids : ['1110','1145']).filter(id=>procById(id));
 const vendorsFor=pid=>(S.cfg.vendors||[]).filter(v=>v.active!==false && (v.pids||[]).includes(pid)).sort((a,b)=>a.name.localeCompare(b.name));
-const vName=id=>{ const v=(S.cfg.vendors||[]).find(x=>x.id===id); return v?v.name:''; };
+const vName=id=>{ if(String(id||'').startsWith('n:')) return id.slice(2)+' (not in vendor list)'; const v=(S.cfg.vendors||[]).find(x=>x.id===id); return v?v.name:''; };
 const vKey=s=>String(s||'').toLowerCase().replace(/^\s*m\s*\/\s*s\.?\s*/,'').replace(/[^a-z0-9]/g,'');
 
 /* ---------- Masters › Vendors (Admin) ---------- */
@@ -3653,19 +3729,23 @@ async function vVendorPlan(m){
   const date=S.ui.vpDate || planDays.find(d=>d>=today) || planDays[planDays.length-1] || today; S.ui.vpDate=date;
   const scope=S.ui.vpScope||'plan';
   const [assign, plan]=await Store.getMany(['vend/'+pid,'plan/'+date+'/'+pid]); const A=(assign&&assign.m)||{};
-  const vendors=vendorsFor(pid); const U=normUID;
+  const U=normUID; const vOf=u=>{ const a=A[U(u)]; return a? (a.v || (a.vn?'n:'+a.vn:'')) : ''; };
+  const named=[...new Set(Object.values(A).filter(a=>!a.v && a.vn).map(a=>'n:'+a.vn))];
+  const vendors=vendorsFor(pid).concat(named.map(id=>({id, name:vName(id), capMT:null, code:''})));
   const wip=S.wip.filter(w=>w.processId===pid && !w.completed);
   const wipBy={}; wip.forEach(w=>wipBy[U(w.uid)]=w);
   const planLines=(plan&&plan.lines)||[];
-  const rows=(scope==='plan'? planLines.map(l=>({uid:l.uid, job:l.job, part:l.part, die:toolOf(l), desc:descOf(l), met:l.met, qty:l.qty, kg:l.kg, cust:l.cust, start:l.start, prio:l.groupLabel, planned:date, loc:locOf((wipBy[U(l.uid)]||{}).area)}))
-                            : wip.map(w=>({uid:w.uid, job:w.job, part:w.part, die:w.die, desc:w.desc, met:w.met, qty:w.qty, kg:w.wt, cust:w.cust, start:w.start, prio:w.delay.status, planned:(S.planDateOf||{})[w.key]||'', loc:locOf(w.area)})))
-             .map(r=>({...r, v:(A[U(r.uid)]||{}).v||''}));
+  const locTxt=w=>!w?'':w.origin==='vendor'?'At vendor':locOf(w.area)==='Subcontract'?'Subcon':'In-house';
+  const rows=(scope==='plan'? planLines.map(l=>({uid:l.uid, job:l.job, part:l.part, die:toolOf(l), desc:descOf(l), met:l.met, qty:l.qty, kg:l.kg, cust:l.cust, start:l.start, prio:l.groupLabel, planned:date, w:wipBy[U(l.uid)]}))
+                            : wip.map(w=>({uid:w.uid, job:w.job, part:w.part, die:w.die, desc:w.desc, met:w.met, qty:w.qty, kg:w.wt, cust:w.cust, start:w.start, prio:w.delay.status, planned:(S.planDateOf||{})[w.key]||'', w})))
+             .map(r=>{ const a=A[U(r.uid)]||{}; const ch=(r.w&&r.w.challan)||a.ch||'', chd=(r.w&&r.w.challanDate)||a.chd||null;
+               return {...r, v:vOf(r.uid), loc:locTxt(r.w), ch, chd, atV:chd?Math.max(0,Math.round((Date.parse(today)-Date.parse(chd))/864e5)):null}; });
   const filt=S.ui.vpFilter||''; const shown=rows.filter(r=>!filt || (filt==='-'?!r.v:r.v===filt));
   // vendor load: open WIP assigned + plan of the day + booked this month
   const mStart=today.slice(0,8)+'01'; const ex=await execLinesInRange(mStart,today,[pid]);
-  const load=vendors.map(v=>{ const w=wip.filter(x=>(A[U(x.uid)]||{}).v===v.id); const pd=planLines.filter(l=>(A[U(l.uid)]||{}).v===v.id);
-    const bk=ex.filter(l=>(A[U(l.uid)]||{}).v===v.id);
-    return {v, wl:w.length, wkg:w.reduce((s,x)=>s+x.wt,0), pl:pd.length, pkg:pd.reduce((s,l)=>s+l.kg,0), bkg:bk.reduce((s,l)=>s+(+l.actualKg||0),0), days:v.capMT?w.reduce((s,x)=>s+x.wt,0)/1000/v.capMT:null}; });
+  const load=vendors.map(v=>{ const w=wip.filter(x=>vOf(x.uid)===v.id); const pd=planLines.filter(l=>vOf(l.uid)===v.id);
+    const bk=ex.filter(l=>vOf(l.uid)===v.id); const old=w.map(x=>x.challanDate).filter(Boolean).sort()[0];
+    return {v, old, wl:w.length, wkg:w.reduce((s,x)=>s+x.wt,0), pl:pd.length, pkg:pd.reduce((s,l)=>s+l.kg,0), bkg:bk.reduce((s,l)=>s+(+l.actualKg||0),0), days:v.capMT?w.reduce((s,x)=>s+x.wt,0)/1000/v.capMT:null}; });
   const un=rows.filter(r=>!r.v);
   m.innerHTML=head('Vendor planning', `Assign a vendor to each casting of ${esc(pid+' '+procName(pid))}, then print one challan list per vendor. Vendors are kept in Masters › Vendors (Admin).`,
      `${pids.length>1?`<div class="seg" role="group">${pids.map(id=>`<button data-vpp="${id}" aria-pressed="${id===pid}">${esc(id+' '+procName(id))}</button>`).join('')}</div>`:''}
@@ -3676,18 +3756,18 @@ async function vVendorPlan(m){
     <div class="pdeck">${load.filter(x=>S.ui.vpAllV || x.wl || x.pl || x.bkg).map(x=>`<div class="pcard ${x.days!==null&&x.days>5?'bad':x.wl?'ok':''}" data-vf="${x.v.id}" tabindex="0" role="button" title="Show only ${esc(x.v.name)}">
         <div class="ph"><b>${esc(x.v.name)}</b>${x.v.code?`<span class="code">${esc(x.v.code)}</span>`:''}</div>
         <div class="pst" style="margin-top:6px"><span>Open WIP <b class="num">${x.wl}</b> · <b class="num">${mt(x.wkg)}</b> MT</span><span>Plan ${fdate(date).slice(0,6)} <b class="num">${x.pl}</b> · <b class="num">${mt(x.pkg)}</b> MT</span>
-          <span>Booked this month <b class="num">${mt(x.bkg)}</b> MT</span><span>${x.v.capMT?`Load <b class="num" style="color:${x.days>5?'var(--bad)':x.days>3?'var(--warn)':''}">${x.days.toFixed(1)}</b> days at ${fmt(x.v.capMT,1)} MT/day`:'capacity not set'}</span></div></div>`).join('')}
+          <span>Booked this month <b class="num">${mt(x.bkg)}</b> MT</span>${x.old?`<span>Oldest challan <b class="num" style="color:${(Date.parse(today)-Date.parse(x.old))/864e5>30?'var(--bad)':''}">${Math.round((Date.parse(today)-Date.parse(x.old))/864e5)}</b> days</span>`:''}<span>${x.v.capMT?`Load <b class="num" style="color:${x.days>5?'var(--bad)':x.days>3?'var(--warn)':''}">${x.days.toFixed(1)}</b> days at ${fmt(x.v.capMT,1)} MT/day`:'capacity not set'}</span></div></div>`).join('')}
       <div class="pcard ${un.length?'warn':'ok'}" data-vf="-" tabindex="0" role="button"><div class="ph"><b>Not assigned</b></div><div class="pv num" style="color:${un.length?'var(--warn)':'var(--ok)'}">${un.length}</div><div class="small muted">${mt(un.reduce((s,r)=>s+r.kg,0))} MT ${scope==='plan'?'in this plan':'in open WIP'}</div></div></div>
     <div class="panel" style="margin-top:12px"><div class="row" style="justify-content:space-between;flex-wrap:wrap">
         <div class="row"><b>${shown.length}</b>&nbsp;line(s)${filt?` · filter: ${filt==='-'?'not assigned':esc(vName(filt))} <button class="btn ghost sm" id="vpclr">Show all</button>`:''}</div>
         <div class="row"><label class="small">Assign ticked to <select id="vpbulk"><option value="">– vendor –</option>${vendors.map(v=>`<option value="${v.id}">${esc(v.name)}</option>`).join('')}<option value="__none">(remove vendor)</option></select></label><button class="btn heat sm" id="vpgo">Assign</button>
           <button class="btn ghost sm" id="vpprint">Print challan lists</button><button class="btn ghost sm" id="vpxl">Download Excel</button></div></div>
-      ${shown.length?`<div class="tbl-wrap" style="max-height:560px;margin-top:8px"><table><thead><tr><th><input type="checkbox" id="vpall" aria-label="Tick all"></th><th>Vendor</th><th>UID</th><th>Job</th><th>Part no.</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Customer</th><th class="r">Qty</th><th class="r">kg</th><th>${scope==='plan'?'Priority':'Status'}</th><th>Planned</th><th>Location</th></tr></thead><tbody>
-        ${shown.map((r,i)=>`<tr><td><input type="checkbox" data-vt="${i}"></td><td><select data-vs="${i}" style="min-width:170px"><option value="">–</option>${vendors.map(v=>`<option value="${v.id}" ${v.id===r.v?'selected':''}>${esc(v.name)}</option>`).join('')}${r.v&&!vendors.some(v=>v.id===r.v)?`<option value="${r.v}" selected>${esc(vName(r.v)||'(removed vendor)')}</option>`:''}</select></td>
-          <td><b>${esc(r.uid)}</b></td><td>${esc(r.job)}</td><td>${esc(r.part||'')}</td><td>${esc(r.die||'')}</td><td class="wrap">${esc(r.desc||'')}</td><td>${esc(r.met||'')}</td><td>${esc(r.cust||'')}</td><td class="r num">${fmt(r.qty)}</td><td class="r num">${fmt(r.kg,1)}</td><td>${esc(r.prio||'')}</td><td>${r.planned?fdate(r.planned):''}</td><td>${r.loc==='Subcontract'?'<span class="chip blue">Subcon</span>':'In-house'}</td></tr>`).join('')}</tbody></table></div>`
+      ${shown.length?`<div class="tbl-wrap" style="max-height:560px;margin-top:8px"><table><thead><tr><th><input type="checkbox" id="vpall" aria-label="Tick all"></th><th>Vendor</th><th>UID</th><th>Job</th><th>Part no.</th><th>Tooling no.</th><th>Description</th><th>Metallurgy</th><th>Customer</th><th class="r">Qty</th><th class="r">kg</th><th>${scope==='plan'?'Priority':'Status'}</th><th>Planned</th><th>Location</th><th>Challan</th><th class="r">Days at vendor</th></tr></thead><tbody>
+        ${shown.map((r,i)=>`<tr><td><input type="checkbox" data-vt="${i}"></td><td><select data-vs="${i}" style="min-width:170px"><option value="">–</option>${vendors.map(v=>`<option value="${v.id}" ${v.id===r.v?'selected':''}>${esc(v.name)}</option>`).join('')}${r.v&&!vendors.some(v=>v.id===r.v)?`<option value="${esc(r.v)}" selected>${esc(vName(r.v)||'(removed vendor)')}</option>`:''}</select></td>
+          <td><b>${esc(r.uid)}</b></td><td>${esc(r.job)}</td><td>${esc(r.part||'')}</td><td>${esc(r.die||'')}</td><td class="wrap">${esc(r.desc||'')}</td><td>${esc(r.met||'')}</td><td>${esc(r.cust||'')}</td><td class="r num">${fmt(r.qty)}</td><td class="r num">${fmt(r.kg,1)}</td><td>${esc(r.prio||'')}</td><td>${r.planned?fdate(r.planned):''}</td><td>${r.loc==='At vendor'?'<span class="chip warn">At vendor</span>':r.loc==='Subcon'?'<span class="chip blue">Subcon</span>':esc(r.loc)}</td><td class="small">${esc(r.ch)}${r.chd?'<br>'+fdate(r.chd):''}</td><td class="r num" style="color:${r.atV>30?'var(--bad)':''}">${r.atV??''}</td></tr>`).join('')}</tbody></table></div>`
       :`<div class="empty">${scope==='plan'?'No plan for '+esc(pid)+' on '+fday(date)+' – publish the plan or switch to “All open WIP”.':'No open WIP.'}</div>`}</div>`;
   const save=async(uids, v)=>{ const at=new Date().toISOString();
-    await Store.update('vend/'+pid, d=>{ d=d||{m:{}}; uids.forEach(u=>{ if(!v) delete d.m[U(u)]; else d.m[U(u)]={v, by:S.user.username, at}; }); return d; });
+    await Store.update('vend/'+pid, d=>{ d=d||{m:{}}; uids.forEach(u=>{ const o=d.m[U(u)]||{}; if(!v) delete d.m[U(u)]; else d.m[U(u)]={v, ch:o.ch||'', chd:o.chd||null, by:S.user.username, at}; }); return d; });
     await audit('Vendor assignment', pid+': '+uids.length+' casting(s) → '+(v?vName(v):'no vendor')); };
   m.querySelectorAll('[data-vpp]').forEach(b=>b.onclick=()=>{ S.ui.vpPid=b.dataset.vpp; S.ui.vpDate=null; S.ui.vpFilter=''; go('vendors'); });
   m.querySelectorAll('[data-vps]').forEach(b=>b.onclick=()=>{ S.ui.vpScope=b.dataset.vps; go('vendors'); });
@@ -3696,13 +3776,13 @@ async function vVendorPlan(m){
   if($('#vpallv')) $('#vpallv').onclick=()=>{ S.ui.vpAllV=!S.ui.vpAllV; go('vendors'); };
   m.querySelectorAll('[data-vf]').forEach(c=>{ const f=()=>{ S.ui.vpFilter=S.ui.vpFilter===c.dataset.vf?'':c.dataset.vf; go('vendors'); }; c.onclick=f; c.onkeydown=e=>{ if(e.key==='Enter') f(); }; });
   if($('#vpall')) $('#vpall').onchange=e=>m.querySelectorAll('[data-vt]').forEach(x=>x.checked=e.target.checked);
-  m.querySelectorAll('[data-vs]').forEach(s=>s.onchange=async()=>{ const r=shown[+s.dataset.vs]; await save([r.uid], s.value); toast(r.uid+' → '+(s.value?vName(s.value):'no vendor')); go('vendors'); });
+  m.querySelectorAll('[data-vs]').forEach(s=>s.onchange=async()=>{ const r=shown[+s.dataset.vs]; if(s.value.startsWith('n:')) return; await save([r.uid], s.value); toast(r.uid+' → '+(s.value?vName(s.value):'no vendor')); go('vendors'); });
   $('#vpgo').onclick=async()=>{ const v=$('#vpbulk').value; const sel=[...m.querySelectorAll('[data-vt]:checked')].map(x=>shown[+x.dataset.vt]);
     if(!v) return toast('Choose a vendor first.',true); if(!sel.length) return toast('Tick the castings to assign.',true);
     await save(sel.map(r=>r.uid), v==='__none'?'':v); toast(sel.length+' casting(s) '+(v==='__none'?'unassigned':'assigned to '+vName(v))+'.'); go('vendors'); };
   const byVendor=()=>{ const g={}; shown.filter(r=>r.v).forEach(r=>{ (g[r.v]=g[r.v]||[]).push(r); }); return g; };
-  $('#vpxl').onclick=()=>xlsxDownload('Vendor plan '+pid+' '+(scope==='plan'?date:'open WIP'), ['Vendor','UID','Job','Part no.','Tooling no.','Description','Metallurgy','Customer','Qty','kg','Planned','Location'],
-    shown.slice().sort((a,b)=>vName(a.v).localeCompare(vName(b.v))).map(r=>[vName(r.v)||'(not assigned)',r.uid,r.job,r.part||'',r.die||'',r.desc||'',r.met||'',r.cust||'',r.qty,+(+r.kg).toFixed(2),r.planned||'',r.loc]));
+  $('#vpxl').onclick=()=>xlsxDownload('Vendor plan '+pid+' '+(scope==='plan'?date:'open WIP'), ['Vendor','UID','Job','Part no.','Tooling no.','Description','Metallurgy','Customer','Qty','kg','Planned','Location','Challan no.','Challan date','Days at vendor'],
+    shown.slice().sort((a,b)=>vName(a.v).localeCompare(vName(b.v))).map(r=>[vName(r.v)||'(not assigned)',r.uid,r.job,r.part||'',r.die||'',r.desc||'',r.met||'',r.cust||'',r.qty,+(+r.kg).toFixed(2),r.planned||'',r.loc,r.ch,r.chd||'',r.atV??'']));
   $('#vpprint').onclick=()=>{ const g=byVendor(); const ids=Object.keys(g).sort((a,b)=>vName(a).localeCompare(vName(b)));
     if(!ids.length) return toast('No assigned castings in this list.',true);
     const w=window.open('','_blank'); if(!w) return toast('Allow pop-ups to print.',true);
