@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Production Planning – Day-wise | AMTC Foundry</title>
-<!-- Production Planning – day-wise · Release 1.7 (28-Nov-2026: module pages in the left menu; Summary day / week / month with totals) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
+<!-- Production Planning – day-wise · Release 1.8 (28-Nov-2026: furnaces available by default; breakdown / maintenance reported with reason; downtime log) · Prepared by Arun Kumar – Operations. Single-file app: vanilla JS, SheetJS (Excel import), Chart.js, Firebase (Auth + Firestore). -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
@@ -722,6 +722,7 @@ async function loadConfig(){ S.cfg=await Store.get('config'); if(!S.cfg){ S.cfg=
   if(!S.cfg.routes) S.cfg.routes=defaultRoutes(); if(!S.cfg.departments) S.cfg.departments=DEFAULT_DEPTS(); S.cfg.settings.wipMode=S.cfg.settings.wipMode||'Synchro snapshot'; S.cfg.settings.entryStages=S.cfg.settings.entryStages||'1060'; }
 async function saveConfig(mut, what){
   S.cfg=await Store.update('config', c=>{ c=c||defaultConfig(); if(!c.departments) c.departments=DEFAULT_DEPTS(); if(!c.routes) c.routes=defaultRoutes(); mut(c); return c; });
+  if(typeof applyFurnState==='function') applyFurnState();
   if(what) await audit('Master change', what);
 }
 async function loadAll(){
@@ -732,6 +733,7 @@ async function loadAll(){
   S.cfOpen=((await Store.get('cf/open'))||{list:[]}).list;
   S.ht=(await Store.get('ht/active'))||{batches:[]};
   S.htProgress=(await Store.get('ht/progress'))||{};
+  S.fstat=(await Store.get('ht/fstat'))||{}; applyFurnState();
   const y=+E.todayISO().slice(0,4);
   const [s1,s0,n1,n0]=await Store.getMany(['sum/'+y,'sum/'+(y-1),'snap/'+y,'snap/'+(y-1)]);
   S.sums=Object.assign({}, (s0||{}).d||{}, (s1||{}).d||{});
@@ -2348,8 +2350,9 @@ async function vHT(m){
   if(!edit) return;
   renderLoadBuilder();
   $('#hgen').onclick=()=>generateHT(new Date($('#hs').value).toISOString(), +$('#hh').value||hz);
-  m.querySelectorAll('[data-fsave]').forEach(b=>b.onclick=async()=>{ const id=b.dataset.fsave; const st=m.querySelector(`[data-fst="${id}"]`).value; const av=m.querySelector(`[data-fav="${id}"]`).value;
-    await saveConfig(c=>{ const f=c.furnaces.find(x=>x.id===id); f.status=st; f.availableFrom=av?new Date(av).toISOString():''; }, 'Furnace '+id+' status '+st+(av?' until '+av:''));
+  m.querySelectorAll('[data-fdown]').forEach(b=>b.onclick=()=>reportFurnaceDown(b.dataset.fdown));
+  m.querySelectorAll('[data-fup]').forEach(b=>b.onclick=()=>furnaceBackInService(b.dataset.fup));
+  m.querySelectorAll('[data-fsave]').forEach(b=>b.onclick=async()=>{
     toast('Furnace status saved.'); go('ht'); });
   m.querySelectorAll('[data-bact]').forEach(b=>b.onclick=()=>batchAction(b.dataset.bact, b.dataset.id));
 }
@@ -2500,10 +2503,10 @@ function furnaceCard(f, edit){
   if(run){ const st=run.actualStart||run.plannedStart; const el=E.hoursBetween(st,new Date().toISOString()); const p=Math.min(100,Math.max(0,100*el/run.cycleH));
     prog=`<div class="small" style="margin-top:8px"><b>Running:</b> ${esc(run.recipeName)} · ${mt(run.kg)} MT · ${fmt(el,1)} of ${run.cycleH} h</div><div class="bar"><i style="width:${p}%;background:${el>run.cycleH?'var(--bad)':'var(--heat)'}"></i></div>`; }
   return `<div class="panel" style="border-top:3px solid ${run?'var(--heat)':'var(--line)'}"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(f.name)} <span class="muted small">${esc(f.id)}</span></h3><span class="chip ${stc}">${esc(f.status)}</span></div>
-    <div class="small muted">${fmt(f.capacityKg)} kg · ${esc(f.size||'')}${f.availableFrom?' · available from '+fdt(f.availableFrom):''}</div>${prog}
+    <div class="small muted">${fmt(f.capacityKg)} kg · ${esc(f.size||'')}</div>
+    ${f.status!=='Available'?`<div class="banner ${f.status==='Maintenance'?'warn':'bad'}" style="margin:8px 0 0;padding:8px 10px"><b>${esc(f.status)}</b> since ${fdt(f.downSince)} · <b>${esc(f.downReason||'')}</b>${f.downRemarks?' – '+esc(f.downRemarks):''}<br><span class="small">${f.availableFrom?'Expected back '+fdt(f.availableFrom):'Return time not known – loads cannot be planned'} · reported by ${esc(f.downBy||'')}</span></div>`:''}${prog}
     <div class="small" style="margin-top:6px"><b>Next:</b> ${next?esc(next.recipeName)+' · '+mt(next.kg)+' MT · '+fdt(next.plannedStart):'none scheduled'}</div>
-    ${edit?`<div class="row" style="margin-top:10px"><select data-fst="${f.id}">${['Available','Maintenance','Breakdown','Out of service'].map(s=>`<option ${s===f.status?'selected':''}>${s}</option>`).join('')}</select>
-      <input type="datetime-local" data-fav="${f.id}" value="${dtLocalVal(f.availableFrom)}" title="Available again from"><button class="btn ghost sm" data-fsave="${f.id}">Save</button></div>`:''}</div>`;
+    ${edit?`<div class="row" style="margin-top:10px">${f.status==='Available'?`<button class="btn ghost sm" data-fdown="${f.id}">Report breakdown / maintenance</button>`:`<button class="btn heat sm" data-fup="${f.id}">Back in service</button><button class="btn ghost sm" data-fdown="${f.id}">Change</button>`}</div>`:''}</div>`;
 }
 function batchTable(list, edit){
   if(!list.length) return '<div class="empty">No loads yet. Select castings above and load them to a furnace.</div>';
@@ -2642,6 +2645,7 @@ async function vHTDash(m){
       :'<div class="empty">No delayed HT WIP'+(S.cfg.leadTimes.some(l=>l.processId===hp.id)?'':' (no HT lead time configured yet)')+'.</div>'}`;
   m.querySelectorAll('[data-w]').forEach(b=>b.onclick=()=>{ S.ui.htWin=+b.dataset.w; go('htdash'); });
   drawGantt($('#hg'), [...S.ht.batches, ...done.filter(b=>new Date(b.actualEnd)>new Date(now-48*3600000))], new Date().toISOString(), 120);
+  m.insertAdjacentHTML('beforeend', await downtimeHTML(win));
 }
 function recipeSchedule(){
   const by={}; S.ht.batches.forEach(b=>{ const r=by[b.recipeName]=by[b.recipeName]||{n:0,kg:0,next:null,cyc:b.cycleH}; r.n++; r.kg+=b.kg; if(b.status==='Planned' && (!r.next||b.plannedStart<r.next)) r.next=b.plannedStart; });
@@ -2707,6 +2711,66 @@ function vHTRecipes(m){
         }, 'HT recipes uploaded from '+f.name);
         derive(); toast(`Recipes saved: ${nN} new, ${nU} updated.`); go(S.view==='dept'?'recipes':'ht'); };
     }catch(err){ $('#rcprev').innerHTML=`<div class="banner bad">${esc(err.message)}</div>`; } };
+}
+
+/* ===================== FURNACE STATUS & BREAKDOWN LOG ===================== */
+/* A furnace is AVAILABLE by default – nobody has to set it every day. Only a breakdown, maintenance or
+   out-of-service is reported, with a reason; it ends with “Back in service” or at the expected return time.
+   Kept in ht/fstat (current state) and ht/downtime (log for failure analysis), so the HT user can update it. */
+const FURN_REASONS=['Heating element failure','Thermocouple / temperature control','Controller / PLC fault','Power failure','Door / seal problem','Fan / circulation failure','Gas / atmosphere supply','Cooling water problem','Quench system problem','Preventive maintenance','Calibration / survey (TUS / SAT)','No load available','Other'];
+function applyFurnState(){
+  if(!S.cfg || !S.cfg.furnaces) return; const now=new Date().toISOString(); const st=S.fstat||{};
+  S.cfg.furnaces.forEach(f=>{ const x=st[f.id];
+    if(x && x.status && x.status!=='Available' && (!x.until || x.until>now)){ f.status=x.status; f.availableFrom=x.until||''; f.downReason=x.reason; f.downRemarks=x.remarks||''; f.downSince=x.since; f.downBy=x.by; }
+    else { f.status='Available'; f.availableFrom=''; delete f.downReason; delete f.downRemarks; delete f.downSince; delete f.downBy; } });
+}
+function reportFurnaceDown(fid){
+  const f=S.cfg.furnaces.find(x=>x.id===fid); const cur=(S.fstat||{})[fid]||{}; const isDown=f.status!=='Available';
+  const nowL=dtLocalVal(new Date().toISOString());
+  const d=modal((isDown?'Change status – ':'Report breakdown / maintenance – ')+f.name, `
+    <div class="grid g2"><label class="field">Status<select id="fd_st">${['Breakdown','Maintenance','Out of service'].map(s=>`<option ${s===(isDown?f.status:'Breakdown')?'selected':''}>${s}</option>`).join('')}</select></label>
+      <label class="field">Reason *<select id="fd_rs"><option value="">– choose –</option>${FURN_REASONS.map(r=>`<option ${isDown&&r===cur.reason?'selected':''}>${esc(r)}</option>`).join('')}</select></label></div>
+    <label class="field" style="margin-top:8px">Details (what failed, action taken)<input id="fd_rm" value="${esc(isDown?cur.remarks||'':'')}" style="width:100%"></label>
+    <div class="grid g2" style="margin-top:8px"><label class="field">Down since<input type="datetime-local" id="fd_from" value="${isDown?dtLocalVal(cur.since):nowL}"></label>
+      <label class="field">Expected back (optional)<input type="datetime-local" id="fd_to" value="${isDown&&cur.until?dtLocalVal(cur.until):''}"></label></div>
+    <p class="small muted">Without an expected time the furnace stays blocked until someone clicks “Back in service”. With a time, it becomes available automatically at that time.</p>
+    <div id="fd_msg" class="small" style="color:var(--bad)"></div>`,
+    [{label:isDown?'Save':'Report', cls:'heat', fn:async x=>{
+      const st=x.querySelector('#fd_st').value, rs=x.querySelector('#fd_rs').value, rm=x.querySelector('#fd_rm').value.trim();
+      const from=x.querySelector('#fd_from').value, to=x.querySelector('#fd_to').value;
+      if(!rs){ x.querySelector('#fd_msg').textContent='Choose a reason.'; return false; }
+      if(rs==='Other' && !rm){ x.querySelector('#fd_msg').textContent='Describe the reason in Details.'; return false; }
+      const since=from?new Date(from).toISOString():new Date().toISOString(), until=to?new Date(to).toISOString():'';
+      if(until && until<=since){ x.querySelector('#fd_msg').textContent='Expected back must be after “down since”.'; return false; }
+      const logId=isDown&&cur.logId?cur.logId:uidGen('DT');
+      await Store.update('ht/fstat', s=>{ s=s||{}; s[fid]={status:st, reason:rs, remarks:rm, since, until, by:S.user.username, at:new Date().toISOString(), logId}; return s; });
+      await Store.update('ht/downtime', s=>{ s=s||{list:[]}; const e=s.list.find(y=>y.id===logId);
+        if(e) Object.assign(e,{status:st, reason:rs, remarks:rm, from:since, expected:until}); else s.list.push({id:logId, fid, status:st, reason:rs, remarks:rm, from:since, expected:until, to:'', by:S.user.username}); return s; });
+      await audit('Furnace '+st, fid+': '+rs+(rm?' – '+rm:'')+(until?' · expected back '+until:''));
+      S.fstat=(await Store.get('ht/fstat'))||{}; applyFurnState(); toast(f.name+': '+st+' reported.'); go(S.view==='dept'?'ht':'ht'); }}]);
+}
+async function furnaceBackInService(fid){
+  const f=S.cfg.furnaces.find(x=>x.id===fid); const cur=(S.fstat||{})[fid]||{}; const now=new Date().toISOString();
+  await Store.update('ht/fstat', s=>{ s=s||{}; s[fid]={status:'Available', since:now, by:S.user.username}; return s; });
+  await Store.update('ht/downtime', s=>{ s=s||{list:[]}; const e=s.list.find(y=>y.id===cur.logId); if(e && !e.to){ e.to=now; e.closedBy=S.user.username; } return s; });
+  await audit('Furnace back in service', fid+' after '+(cur.reason||'')+' since '+(cur.since||''));
+  S.fstat=(await Store.get('ht/fstat'))||{}; applyFurnState(); toast(f.name+' is available again.'); go('ht');
+}
+/* downtime log + hours by reason (HT dashboard) */
+async function downtimeHTML(days){
+  const d=(await Store.get('ht/downtime'))||{list:[]}; const now=new Date().toISOString(); const from=new Date(Date.now()-days*86400000).toISOString();
+  const L=d.list.map(e=>{ const end=e.to || (e.expected && e.expected<now? e.expected : now); return {...e, end, open:!e.to && !(e.expected && e.expected<now), h:Math.max(0,(Date.parse(end)-Date.parse(e.from))/3600000)}; })
+    .filter(e=>e.end>=from).sort((a,b)=>a.from<b.from?1:-1);
+  const byR={}; L.forEach(e=>{ byR[e.reason]=(byR[e.reason]||0)+e.h; }); const R=Object.entries(byR).sort((a,b)=>b[1]-a[1]); const tot=R.reduce((s,r)=>s+r[1],0);
+  const fh=days*24*S.cfg.furnaces.length; const avail=fh?100*(1-tot/fh):null;
+  return `<h2>Furnace downtime – last ${days} days</h2>
+    <div class="kpis"><div class="kpi ${ragClass(avail)}"><div class="v num">${pctTxt(avail)}</div><div class="l">Furnace availability (all furnaces)</div></div>
+      <div class="kpi ${tot?'bad':'ok'}"><div class="v num">${fmt(tot,1)} h</div><div class="l">Downtime · ${L.length} event(s)</div></div>
+      <div class="kpi"><div class="v num">${L.filter(e=>e.open).length}</div><div class="l">Open now</div></div></div>
+    ${R.length?`<div class="grid g2" style="margin-top:10px;align-items:start"><div class="panel"><h3 style="margin:0 0 6px">Hours by reason</h3>${R.map(([r,h])=>`<div class="row" style="gap:8px;margin:4px 0"><span style="min-width:210px" class="small">${esc(r)}</span><div class="bul" style="flex:1"><i style="width:${tot?100*h/R[0][1]:0}%;background:#B8322A"></i></div><b class="num small" style="min-width:60px;text-align:right">${fmt(h,1)} h</b></div>`).join('')}</div>
+      <div class="panel"><h3 style="margin:0 0 6px">Events</h3><div class="tbl-wrap" style="max-height:300px"><table><thead><tr><th>Furnace</th><th>Status</th><th>Reason</th><th>From</th><th>To</th><th class="r">Hours</th><th>By</th></tr></thead><tbody>
+      ${L.map(e=>`<tr class="${e.status==='Breakdown'?'rowbad':''}"><td>${esc(e.fid)}</td><td>${esc(e.status)}</td><td>${esc(e.reason)}${e.remarks?`<div class="small muted">${esc(e.remarks)}</div>`:''}</td><td>${fdt(e.from)}</td><td>${e.open?'<span class="chip bad">open</span>':fdt(e.end)}</td><td class="r num">${fmt(e.h,1)}</td><td>${esc(e.by||'')}</td></tr>`).join('')}</tbody></table></div></div></div>`
+      :'<div class="empty">No breakdown or maintenance reported in this period. ✔</div>'}`;
 }
 
 /* ===================== MANAGEMENT DASHBOARD ===================== */
@@ -2897,9 +2961,8 @@ const MASTERS={
       {k:'cyc',l:'Cycle h',t:'ro',f:r=>E.cycleHours(r)},{k:'maxBatchKg',l:'Max batch kg',t:'num',w:80},{k:'furnaces',l:'Furnaces',w:70,f:r=>(r.furnaces||[]).join(','),p:(r,v)=>{ r.furnaces=v.split(',').map(x=>x.trim()).filter(Boolean); }},
       {k:'sequence',l:'Sequence',t:'num',w:55},{k:'status',l:'Status',t:'sel',o:['Active','Draft','Inactive']},{k:'remarks',l:'Remarks',w:180}],
     blank:()=>({id:'R-'+Date.now().toString(36).slice(-4).toUpperCase(),name:'',metallurgies:'',process:'',stages:[],maxBatchKg:2500,furnaces:['F1','F2'],sequence:1,status:'Draft',remarks:''})},
-  'Furnaces':{key:'furnaces', help:'Furnaces run 24 hours. Turnaround = hours between batches for unloading and loading. Part dimensions are not in the Synchro export, so batch fit is checked by weight only.',
-    cols:[{k:'id',l:'Furnace ID',w:60},{k:'name',l:'Name',w:120},{k:'capacityKg',l:'Capacity kg',t:'num'},{k:'size',l:'Size',w:110},{k:'status',l:'Status',t:'sel',o:['Available','Maintenance','Breakdown','Out of service']},
-      {k:'availableFrom',l:'Available from',t:'dt'},{k:'turnaroundH',l:'Turnaround h',t:'num',w:70}],
+  'Furnaces':{key:'furnaces', help:'Furnaces are available by default; breakdowns and maintenance are reported on the furnace card in Furnace loads. Furnaces run 24 hours. Turnaround = hours between batches for unloading and loading. Part dimensions are not in the Synchro export, so batch fit is checked by weight only.',
+    cols:[{k:'id',l:'Furnace ID',w:60},{k:'name',l:'Name',w:120},{k:'capacityKg',l:'Capacity kg',t:'num'},{k:'size',l:'Size',w:110},{k:'turnaroundH',l:'Turnaround h',t:'num',w:70}],
     blank:()=>({id:'F'+(S.cfg.furnaces.length+1),name:'Furnace '+(S.cfg.furnaces.length+1),capacityKg:2500,size:'',status:'Available',availableFrom:'',turnaroundH:0})},
   'Holidays':{key:'holidays', help:'Plant holidays are skipped by every non-HT process when planning and when carrying shortfall to the next working day.',
     cols:[{k:'date',l:'Date',t:'date'},{k:'name',l:'Holiday',w:220}], blank:()=>({date:'',name:''})},
